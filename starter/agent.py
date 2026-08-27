@@ -39,6 +39,7 @@ class Agent:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: set[str] = set()
+        self._history: dict[str, list[str]] = {}
         self._build_index()
 
     def _build_index(self) -> None:
@@ -73,6 +74,7 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
         self._sessions.add(session_id)
+        self._history[session_id] = []
 
     def respond(
         self,
@@ -83,7 +85,9 @@ class Agent:
     ) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
+        self._history[session_id].append(user_message)
+        accumulated_query = " ".join(self._history[session_id])
+        unique_terms = list(dict.fromkeys(_terms(accumulated_query)))[:40]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
         if not expression:
             recommendations: list[dict] = []
@@ -95,8 +99,8 @@ class Agent:
             ).fetchall()
             recommendations = [{"parent_asin": str(row[0])} for row in rows]
         return {
-            "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
+            "message": "What other product requirement matters most to you?",
+            "ask_attribute": "other",
             "recommendations": recommendations,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
