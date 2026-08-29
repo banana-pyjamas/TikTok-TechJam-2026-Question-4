@@ -6,7 +6,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from starter.contracts import SessionState
+from starter.contracts import Candidate, Context, RankingResult, SessionState
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -15,6 +15,11 @@ STOPWORDS = {
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
 }
+
+# The baseline BM25 field-weight expression. Kept as one constant so the
+# SELECT projection and the ORDER BY can never drift apart (CP 1.3).
+_BM25_RANK = "bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)"
+_RESPONSE_MESSAGE = "Here are the closest matches I found."
 
 
 def _text(value: object) -> str:
@@ -35,8 +40,120 @@ def _terms(text: str) -> list[str]:
     ]
 
 
+# --------------------------------------------------------------------------
+# Minimum end-to-end turn pipeline (Phase 1).
+#
+#   user message -> Context -> BM25 -> Candidate[] -> RankingResult -> respond()
+#
+# Each stage is a small pure function so B / C / D can review and test it in
+# isolation. Retrieval and ranking are still the weak baseline: BM25 only, no
+# state-driven query rewriting. Nothing here mutates SessionState yet (Phase 2).
+# --------------------------------------------------------------------------
+
+
+def _build_context(
+    session_id: str, user_message: str, turn: int, state: SessionState
+) -> Context:
+    """CP 1.2 - wrap a turn's inputs in a minimal, safe Context.
+
+    No query derivation happens yet; downstream reads ``user_message``
+    directly. ``state`` is stored by reference so later layers see live
+    session state rather than a stale copy.
+    """
+    return Context(
+        session_id=session_id,
+        turn=turn,
+        user_message=user_message if isinstance(user_message, str) else "",
+        state=state,
+    )
+
+
+def _bm25_search(
+    connection: sqlite3.Connection, text: str, limit: int
+) -> list[tuple[str, float]]:
+    """CP 1.3 - the baseline BM25 query, behavior unchanged.
+
+    Same tokenization, same ``OR`` expression, same weighted ``bm25`` ORDER
+    BY, same ``LIMIT``. The only difference from the old inline query is that
+    the raw ``bm25`` value is also selected (projection only - it does not
+    affect which rows match or their order). Rows come back best-first;
+    SQLite ``bm25`` is more negative for a better match.
+    """
+    terms = list(dict.fromkeys(_terms(text)))[:40]
+    expression = " OR ".join(f'"{term}"' for term in terms)
+    if not expression:
+        return []
+    rows = connection.execute(
+        f"SELECT parent_asin, {_BM25_RANK} FROM products WHERE products MATCH ? "
+        f"ORDER BY {_BM25_RANK} LIMIT ?",
+        (expression, limit),
+    ).fetchall()
+    return [(str(parent_asin), float(raw)) for parent_asin, raw in rows]
+
+
+def _to_candidates(rows: list[tuple[str, float]]) -> list[Candidate]:
+    """CP 1.4 - BM25 rows -> Candidate[].
+
+    Preserves ``parent_asin`` and retrieval order. The raw SQLite ``bm25``
+    value is negated on the way in so ``route_scores["bm25"]`` follows the
+    usual "higher is better" convention; ``route_sources`` becomes
+    ``("bm25",)``.
+    """
+    return [
+        Candidate(parent_asin=parent_asin, route_scores={"bm25": -raw})
+        for parent_asin, raw in rows
+    ]
+
+
+def _rank(candidates: list[Candidate], top_k: int) -> RankingResult:
+    """CP 1.5 - sort candidates by BM25 score (higher = better), keep Top-k.
+
+    Python's sort is stable, so candidates with an equal score keep their
+    retrieval order. ``diagnostics`` here is minimal and provisional; the
+    full ranking-diagnostics schema is CP 6.7.
+    """
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: candidate.route_scores.get("bm25", float("-inf")),
+        reverse=True,
+    )[: max(0, top_k)]
+    diagnostics = {
+        candidate.parent_asin: {
+            "rank": index + 1,
+            "bm25_score": candidate.route_scores.get("bm25", 0.0),
+        }
+        for index, candidate in enumerate(ordered)
+    }
+    return RankingResult(ranked=ordered, diagnostics=diagnostics)
+
+
+def _to_response(result: RankingResult, top_k: int) -> dict:
+    """CP 1.6 - RankingResult -> evaluator-compatible respond() payload.
+
+    ``message`` is the baseline string, ``ask_attribute`` is ``None`` (no
+    clarification yet), and ``recommendations`` is at most ``top_k``
+    ``{"parent_asin": ...}`` entries in ranked order.
+    """
+    recommendations = [
+        {"parent_asin": candidate.parent_asin}
+        for candidate in result.ranked[: max(0, top_k)]
+    ]
+    return {
+        "message": _RESPONSE_MESSAGE,
+        "ask_attribute": None,
+        "recommendations": recommendations,
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+    }
+
+
 class Agent:
-    """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
+    """Minimum end-to-end agent.
+
+    Per-session ``SessionState`` plus baseline BM25 retrieval, wired through
+    the shared ``Context`` / ``Candidate`` / ``RankingResult`` contracts.
+    Retrieval and ranking are still the weak baseline (BM25 only, no
+    state-driven query). No network or LLM dependency.
+    """
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
@@ -94,22 +211,14 @@ class Agent:
         turn: int,
         top_k: int,
     ) -> dict:
+        """CP 1.7 - one turn end to end: Context -> BM25 -> Candidate[] ->
+        RankingResult -> respond() payload. Read-only w.r.t. SessionState."""
         if session_id not in self._states:
             raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
-        expression = " OR ".join(f'"{term}"' for term in unique_terms)
-        if not expression:
-            recommendations: list[dict] = []
-        else:
-            rows = self.connection.execute(
-                "SELECT parent_asin FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k),
-            ).fetchall()
-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
-        return {
-            "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
-            "recommendations": recommendations,
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-        }
+        context = _build_context(
+            session_id, user_message, turn, self._states[session_id]
+        )
+        rows = _bm25_search(self.connection, context.user_message, top_k)
+        candidates = _to_candidates(rows)
+        result = _rank(candidates, top_k)
+        return _to_response(result, top_k)
