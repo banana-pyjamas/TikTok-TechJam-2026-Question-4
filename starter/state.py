@@ -1,9 +1,14 @@
-"""Deterministic session-state manager (Phase 2 + Phase 3).
+"""Deterministic session-state manager (Phase 2 + Phase 3 + Phase 4).
 
 Single authoritative writer of ``SessionState``. Given a raw user message it:
 
 * extracts structured slot values with keyword / regex rules only -- no LLM,
   no network (principle J: the core must work offline);
+* validates the delta before it can touch state -- unknown slots, invalid
+  operations, and out-of-range / NaN confidences are rejected; extractor
+  failure yields an empty delta and the previous state is kept intact
+  (Phase 4). ``validate_delta`` is a no-op on the deterministic extractor's
+  output; it guards a future / fuzzy / LLM delta source;
 * detects intent-override cues deterministically ("actually" -> REPLACE,
   "also" -> ADD, "not leather" -> REMOVE) and applies the operation
   slot-specifically -- an override to one slot never disturbs the others
@@ -33,11 +38,15 @@ as read-only.
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
 from starter.contracts import SessionState
 from starter.text import STOPWORDS, TOKEN_RE, terms
+
+_VALID_OPS = {"SET", "REPLACE", "ADD", "REMOVE"}
+_VALID_CUES = {"replace", "add"}
 
 # Slot-marker words that carry no standalone free-text signal, so they never
 # make a message "residual" for evidence purposes.
@@ -385,6 +394,95 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------
+# Delta validation (Phase 4) -- the guard between any delta source and the
+# state manager.
+# --------------------------------------------------------------------------
+
+
+def _clean_confidence(value: object) -> float | None:
+    """Confidence in ``(0, 1]``, or ``None`` meaning "drop this entry".
+
+    ``None`` -> ``1.0`` (an absent confidence is trusted). ``NaN`` or
+    non-numeric -> drop. Out of range -> clamped to ``[0, 1]``. Zero -> drop
+    (CP 4.3).
+    """
+    if value is None:
+        return 1.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:  # NaN
+        return None
+    number = min(1.0, max(0.0, number))
+    return number if number > 0.0 else None
+
+
+def validate_delta(delta: object) -> dict[str, dict[str, Any]]:
+    """Sanitize a delta from any source before ``apply_delta`` sees it.
+
+    * non-dict input, or an entry that is not a dict -> dropped;
+    * unknown slot name -> dropped (CP 4.1);
+    * explicit ``op`` outside ``{SET, REPLACE, ADD, REMOVE}`` -> entry
+      dropped (CP 4.2);
+    * ``confidence`` coerced per ``_clean_confidence``; drop-worthy -> entry
+      dropped (CP 4.3);
+    * ``values`` / ``remove`` kept only if a list of ``str``; entry with
+      neither -> dropped;
+    * ``cardinality`` forced to the known value; unknown ``cue`` -> dropped;
+    * ``bounds`` kept only if a dict of numeric-or-None min/max.
+
+    A no-op on ``extract_delta``'s deterministic output.
+    """
+    if not isinstance(delta, dict):
+        return {}
+    clean: dict[str, dict[str, Any]] = {}
+    for slot, entry in delta.items():
+        if slot not in SLOT_CARDINALITY or not isinstance(entry, dict):
+            continue
+        if "op" in entry and entry["op"] not in _VALID_OPS:
+            continue
+        confidence = _clean_confidence(entry.get("confidence"))
+        if confidence is None:
+            continue
+        raw_values = entry.get("values")
+        values = [v for v in raw_values if isinstance(v, str)] if isinstance(raw_values, list) else []
+        raw_remove = entry.get("remove")
+        remove = [v for v in raw_remove if isinstance(v, str)] if isinstance(raw_remove, list) else []
+        if not values and not remove:
+            continue
+        cleaned: dict[str, Any] = {"values": values, "cardinality": SLOT_CARDINALITY[slot]}
+        if remove:
+            cleaned["remove"] = remove
+        if entry.get("cue") in _VALID_CUES:
+            cleaned["cue"] = entry["cue"]
+        if confidence < 1.0:
+            cleaned["confidence"] = confidence
+        bounds = entry.get("bounds")
+        if isinstance(bounds, dict):
+            low, high = bounds.get("min"), bounds.get("max")
+            if all(x is None or (isinstance(x, (int, float)) and x == x) for x in (low, high)):
+                cleaned["bounds"] = {"min": low, "max": high}
+        clean[slot] = cleaned
+    return clean
+
+
+def safe_extract_delta(message: str) -> dict[str, dict[str, Any]]:
+    """``extract_delta`` guarded to never raise -- any failure yields an
+    empty delta (CP 4.4).
+
+    A standalone helper for callers that want a non-throwing extract.
+    ``update_state`` does not use it: it calls ``extract_delta`` inside its
+    own try/except so a failure in validation or application rolls state
+    back too, not just an extractor failure.
+    """
+    try:
+        return extract_delta(message)
+    except Exception:
+        return {}
+
+
+# --------------------------------------------------------------------------
 # State manager: the single authoritative writer.
 # --------------------------------------------------------------------------
 
@@ -464,9 +562,16 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
     A slot the delta does not mention is never touched (CP 2.2). Superseded
     values do not spontaneously return (CP 3.6): later turns only re-add a
     value if the message states it again.
+
+    Defensive on a raw (unvalidated) delta too: an unknown slot or an
+    invalid explicit ``op`` is skipped rather than applied (CP 4.1 / 4.2).
     """
     for slot, incoming in delta.items():
-        cardinality = incoming["cardinality"]
+        if not isinstance(incoming, dict) or slot not in SLOT_CARDINALITY:
+            continue
+        if incoming.get("op") is not None and incoming["op"] not in _VALID_OPS:
+            continue
+        cardinality = incoming.get("cardinality") or SLOT_CARDINALITY[slot]
         remove = list(incoming.get("remove") or [])
         values = list(incoming.get("values") or [])
         cue = incoming.get("cue")
@@ -589,11 +694,28 @@ def update_state(state: SessionState, message: object, turn: object) -> SessionS
     """Single per-turn entry point the Agent calls before retrieval.
 
     Deterministic and offline. Mutates ``state`` in place and returns it.
+
+    Phase 4 robustness: the delta is validated before it can touch state,
+    and the whole update is wrapped -- if extraction, validation, or
+    application fails for any reason, ``state`` is rolled back to exactly
+    what it was before this turn (CP 4.4). A no-op turn (nothing extracted,
+    everything rejected) is not a failure; it simply leaves state unchanged.
     """
     text = message if isinstance(message, str) else ""
-    delta = extract_delta(text)
-    apply_delta(state, delta, turn if isinstance(turn, int) else state.turn)
-    update_evidence(state, text, delta, turn if isinstance(turn, int) else state.turn)
+    turn_value = turn if isinstance(turn, int) else state.turn
+    snapshot = (
+        copy.deepcopy(state.slots),
+        copy.deepcopy(state.evidence),
+        copy.deepcopy(state.provenance),
+        state.turn,
+    )
+    try:
+        delta = validate_delta(extract_delta(text))
+        apply_delta(state, delta, turn_value)
+        update_evidence(state, text, delta, turn_value)
+    except Exception:
+        state.slots, state.evidence, state.provenance, state.turn = snapshot
+        return state
     if isinstance(turn, int) and turn > state.turn:
         state.turn = turn
     return state
