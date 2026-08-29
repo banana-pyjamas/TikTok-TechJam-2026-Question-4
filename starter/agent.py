@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import sqlite3
 from pathlib import Path
 
 from starter.contracts import Candidate, Context, RankingResult, SessionState
+from starter.state import update_state
+from starter.text import flatten_text as _text
+from starter.text import terms as _terms
 
-
-TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
-STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
-    "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
-    "that", "the", "this", "to", "want", "with", "would", "you", "looking",
-}
 
 # The baseline BM25 field-weight expression. Kept as one constant so the
 # SELECT projection and the ORDER BY can never drift apart (CP 1.3).
@@ -30,24 +25,6 @@ _MAX_RECOMMENDATIONS = 10
 def _effective_k(top_k: int) -> int:
     """Clamp a caller-supplied top_k to ``[0, _MAX_RECOMMENDATIONS]``."""
     return min(max(0, top_k), _MAX_RECOMMENDATIONS)
-
-
-def _text(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, dict):
-        return " ".join(f"{key} {item}" for key, item in value.items())
-    if isinstance(value, list):
-        return " ".join(str(item) for item in value)
-    return str(value)
-
-
-def _terms(text: str) -> list[str]:
-    return [
-        token.lower()
-        for token in TOKEN_RE.findall(text)
-        if len(token) > 1 and token.lower() not in STOPWORDS
-    ]
 
 
 # --------------------------------------------------------------------------
@@ -225,13 +202,19 @@ class Agent:
         turn: int,
         top_k: int,
     ) -> dict:
-        """CP 1.7 - one turn end to end: Context -> BM25 -> Candidate[] ->
-        RankingResult -> respond() payload. Read-only w.r.t. SessionState."""
+        """One turn end to end.
+
+        The deterministic state manager updates ``SessionState`` first (the
+        single writer, Phase 2); then Context -> BM25 -> Candidate[] ->
+        RankingResult -> payload. Retrieval and ranking do not touch state.
+        Phase 2 stores constraints but does not yet feed them into the
+        query, so the recommendations are still the BM25 baseline.
+        """
         if session_id not in self._states:
             raise RuntimeError("reset must be called before respond")
-        context = _build_context(
-            session_id, user_message, turn, self._states[session_id]
-        )
+        state = self._states[session_id]
+        update_state(state, user_message, turn)
+        context = _build_context(session_id, user_message, turn, state)
         rows = _bm25_search(self.connection, context.user_message, top_k)
         candidates = _to_candidates(rows)
         result = _rank(candidates, top_k)

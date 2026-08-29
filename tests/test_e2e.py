@@ -8,12 +8,22 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from starter.agent import Agent
+from starter.agent import (
+    Agent,
+    _bm25_search,
+    _build_context,
+    _rank,
+    _to_candidates,
+    _to_response,
+)
+from starter.contracts import RankingResult, SessionState
+from starter.state import update_state
 
 _ALLOWED_ASK = {
     None, "category", "material", "color", "size", "style", "brand",
@@ -113,6 +123,37 @@ class TwoTurnE2ETest(_E2EBase):
         self._agent.reset("two", _PROFILE)
         self.assert_valid_payload(self._agent.respond("two", "", 1, 10))
         self.assert_valid_payload(self._agent.respond("two", "wool hat", 2, 10))
+
+
+class SingleWriterTest(_E2EBase):
+    """D Finding 1 — only the deterministic state manager mutates SessionState;
+    retrieval and ranking treat it as read-only."""
+
+    def test_retrieval_and_ranking_do_not_mutate_session_state(self) -> None:
+        state = SessionState(session_id="w")
+        update_state(state, "black leather waterproof boot size 10 under $150", 1)
+        snapshot = copy.deepcopy(state)
+
+        ctx = _build_context("w", "black leather waterproof boot", 1, state)
+        rows = _bm25_search(self._agent.connection, ctx.user_message, 10)
+        candidates = _to_candidates(rows)
+        result = _rank(candidates, 10)
+        _to_response(result, 10)
+
+        self.assertEqual(state, snapshot)
+
+    def test_full_respond_turn_changes_state_only_via_the_manager(self) -> None:
+        self._agent.reset("w", _PROFILE)
+        self._agent.respond("w", "wool hiking sock", 1, 10)
+        state = self._agent._states["w"]
+        # what the manager wrote
+        self.assertEqual(state.slots["category"]["values"], ["socks"])
+        self.assertEqual(state.slots["material"]["values"], ["wool"])
+        self.assertEqual(state.turn, 1)
+        # a second turn accumulates, does not reset
+        self._agent.respond("w", "black", 2, 10)
+        self.assertEqual(state.slots["category"]["values"], ["socks"])
+        self.assertEqual(state.slots["color"]["values"], ["black"])
 
 
 class FiveSessionSmokeTest(_E2EBase):
