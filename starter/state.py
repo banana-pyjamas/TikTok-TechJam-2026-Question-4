@@ -84,8 +84,11 @@ _REPLACE_CUE_RE = re.compile(
 _ADD_CUE_RE = re.compile(
     r"\b(?:also|plus|as well|in addition|additionally|and also|along with)\b", re.I
 )
+# Removal verbs. "drop" is deliberately excluded -- it is also a product noun
+# ("drop earrings", "drop-waist dress"), and a false REMOVE deletes a wanted
+# constraint (D Finding 3). "remove" / "without" / "not" / "no" still cover it.
 _STRONG_NEGATIONS = {
-    "without", "drop", "remove", "lose", "skip", "minus", "nix", "exclude", "ditch",
+    "without", "remove", "lose", "skip", "minus", "nix", "exclude", "ditch",
 }
 _ADJACENT_NEGATIONS = {"not", "no"}
 
@@ -399,6 +402,14 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
+def _clean_str_list(value: object) -> list[str]:
+    """Non-empty, whitespace-trimmed strings from ``value`` if it is a list,
+    else ``[]`` (D Finding 2: an empty string must not reach ``state.slots``)."""
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
 def _clean_confidence(value: object) -> float | None:
     """Confidence in ``(0, 1]``, or ``None`` meaning "drop this entry".
 
@@ -445,15 +456,19 @@ def validate_delta(delta: object) -> dict[str, dict[str, Any]]:
         confidence = _clean_confidence(entry.get("confidence"))
         if confidence is None:
             continue
-        raw_values = entry.get("values")
-        values = [v for v in raw_values if isinstance(v, str)] if isinstance(raw_values, list) else []
-        raw_remove = entry.get("remove")
-        remove = [v for v in raw_remove if isinstance(v, str)] if isinstance(raw_remove, list) else []
+        cardinality = SLOT_CARDINALITY[slot]
+        values = _clean_str_list(entry.get("values"))
+        remove = _clean_str_list(entry.get("remove"))
+        if cardinality == "single":
+            # A single-valued slot holds at most one value (D Finding 1).
+            values = values[:1]
         if not values and not remove:
             continue
-        cleaned: dict[str, Any] = {"values": values, "cardinality": SLOT_CARDINALITY[slot]}
+        cleaned: dict[str, Any] = {"values": values, "cardinality": cardinality}
         if remove:
             cleaned["remove"] = remove
+        if entry.get("op") in _VALID_OPS:
+            cleaned["op"] = entry["op"]
         if entry.get("cue") in _VALID_CUES:
             cleaned["cue"] = entry["cue"]
         if confidence < 1.0:
@@ -550,54 +565,69 @@ def superseded_values(state: SessionState, slot: str) -> set[str]:
 def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int) -> None:
     """Apply a delta to ``state.slots`` -- the single authoritative write.
 
-    Phase 2 accumulation plus Phase 3 operations:
+    Operation, highest priority first:
 
-    * ``remove`` values -> REMOVE (strip from the slot; supersede evidence);
-    * positive values with an ``add`` cue -> ADD (union);
-    * positive values with a ``replace`` cue over an existing value, or any
-      new value for a single-valued slot -> REPLACE (old values superseded);
-    * otherwise the Phase 2 default: ADD for multi-valued, first-time SET for
-      single-valued.
+    * an explicit validated ``op`` (SET / REPLACE / ADD / REMOVE) is
+      authoritative -- a future parser drives operations directly (CP 4.2);
+    * else the Phase 3 cue / ``remove`` semantics ("actually" -> REPLACE,
+      "also" -> ADD, negation -> REMOVE);
+    * else the Phase 2 default: ADD for multi-valued, SET for single-valued.
+
+    Semantics:
+    SET / REPLACE -> slot value set becomes exactly ``values`` (multi-valued
+    slots are NOT unioned); old active values are superseded. ADD -> union,
+    deduplicated; a single-valued slot never accumulates -> ADD collapses to
+    REPLACE (D Finding 1). REMOVE -> strip ``values`` (explicit op) or the
+    negated ``remove`` values (cue path) from the slot; drop the slot if
+    nothing survives; superseded evidence is invalidated (CP 3.6).
 
     A slot the delta does not mention is never touched (CP 2.2). Superseded
-    values do not spontaneously return (CP 3.6): later turns only re-add a
-    value if the message states it again.
-
-    Defensive on a raw (unvalidated) delta too: an unknown slot or an
-    invalid explicit ``op`` is skipped rather than applied (CP 4.1 / 4.2).
+    values do not spontaneously return (CP 3.6). Defensive on a raw delta:
+    unknown slot / invalid explicit ``op`` -> skipped (CP 4.1 / 4.2).
     """
     for slot, incoming in delta.items():
         if not isinstance(incoming, dict) or slot not in SLOT_CARDINALITY:
             continue
-        if incoming.get("op") is not None and incoming["op"] not in _VALID_OPS:
+        explicit_op = incoming.get("op")
+        if explicit_op is not None and explicit_op not in _VALID_OPS:
             continue
         cardinality = incoming.get("cardinality") or SLOT_CARDINALITY[slot]
-        remove = list(incoming.get("remove") or [])
-        values = list(incoming.get("values") or [])
         cue = incoming.get("cue")
         new_bounds = incoming.get("bounds")
         existing = state.slots.get(slot)
         existing_values = list(existing["values"]) if existing else []
 
-        # 1. REMOVE negated values.
+        # An explicit REMOVE carries its targets in `values`; the cue path
+        # carries negated values in `remove`.
+        if explicit_op == "REMOVE":
+            remove = list(incoming.get("values") or [])
+            positive: list[str] = []
+        else:
+            remove = list(incoming.get("remove") or [])
+            positive = list(incoming.get("values") or [])
+        if cardinality == "single":
+            positive = positive[:1]
+
+        # 1. REMOVE phase.
         if remove:
-            survivors = [v for v in existing_values if v not in remove]
             for value in remove:
                 _record(state, turn, slot, "REMOVE", value)
             _supersede_evidence(state, remove)
-            existing_values = survivors
-            if not values:
-                if survivors:
-                    state.slots[slot] = {"values": survivors, "cardinality": cardinality}
+            existing_values = [v for v in existing_values if v not in remove]
+            if not positive:
+                if existing_values:
+                    state.slots[slot] = {"values": existing_values, "cardinality": cardinality}
                 else:
                     state.slots.pop(slot, None)
                 continue
 
-        if not values:
+        if not positive:
             continue
 
         # 2. Decide the operation for the positive values.
-        if cue == "add":
+        if explicit_op in ("SET", "REPLACE", "ADD"):
+            operation = explicit_op
+        elif cue == "add":
             operation = "ADD"
         elif remove:
             operation = "REPLACE"
@@ -607,9 +637,11 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
             operation = "REPLACE"
         else:
             operation = "ADD"
+        if operation == "ADD" and cardinality == "single":
+            operation = "REPLACE"
 
         if operation == "ADD":
-            added = [v for v in values if v not in existing_values]
+            added = [v for v in positive if v not in existing_values]
             if not added:
                 continue
             entry: dict[str, Any] = {
@@ -622,22 +654,25 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
                 _record(state, turn, slot, "ADD", value)
             continue
 
-        # REPLACE (or first-time SET when nothing was there).
-        superseded = [v for v in existing_values if v not in values]
+        # SET / REPLACE: the slot's value set becomes exactly `positive`.
+        superseded = [v for v in existing_values if v not in positive]
         unchanged = (
             existing is not None
-            and existing["values"] == values
+            and existing["values"] == positive
             and existing.get("bounds") == new_bounds
             and not remove
         )
         if unchanged:
             continue
-        entry = {"values": list(values), "cardinality": cardinality}
+        entry = {"values": list(positive), "cardinality": cardinality}
         if new_bounds is not None:
             entry["bounds"] = new_bounds
         state.slots[slot] = entry
-        op_name = "REPLACE" if (existing_values or remove) else "SET"
-        for value in values:
+        if operation == "SET":
+            op_name = "SET"
+        else:
+            op_name = "REPLACE" if (existing_values or remove) else "SET"
+        for value in positive:
             _record(state, turn, slot, op_name, value, superseded or None)
         if superseded:
             _supersede_evidence(state, superseded)
