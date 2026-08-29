@@ -87,6 +87,11 @@ class OneTurnE2ETest(_E2EBase):
         payload = self._agent.respond("one", "black leather waterproof boot", 1, 10)
         self.assertEqual(payload["recommendations"][0]["parent_asin"], "B0BOOT")
 
+    def test_respond_caps_recommendations_at_10_for_oversized_top_k(self) -> None:
+        self._agent.reset("one", _PROFILE)
+        payload = self._agent.respond("one", "shoe boot sock hat wool leather", 1, 100)
+        self.assertLessEqual(len(payload["recommendations"]), 10)
+
 
 class TwoTurnE2ETest(_E2EBase):
     """CP 1.8."""

@@ -21,6 +21,16 @@ STOPWORDS = {
 _BM25_RANK = "bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)"
 _RESPONSE_MESSAGE = "Here are the closest matches I found."
 
+# The evaluator scores at most this many recommendations (agent_api_contract
+# turn_request pins top_k to 10). A larger top_k must never yield a longer
+# list -- enforced at both the ranking and the response stage (CP 1.6).
+_MAX_RECOMMENDATIONS = 10
+
+
+def _effective_k(top_k: int) -> int:
+    """Clamp a caller-supplied top_k to ``[0, _MAX_RECOMMENDATIONS]``."""
+    return min(max(0, top_k), _MAX_RECOMMENDATIONS)
+
 
 def _text(value: object) -> str:
     if value is None:
@@ -57,8 +67,10 @@ def _build_context(
     """CP 1.2 - wrap a turn's inputs in a minimal, safe Context.
 
     No query derivation happens yet; downstream reads ``user_message``
-    directly. ``state`` is stored by reference so later layers see live
-    session state rather than a stale copy.
+    directly. ``state`` is passed by reference so later layers read live
+    session state; they must treat it as read-only. Only the deterministic
+    state manager mutates ``SessionState`` (single-writer invariant, see
+    ``starter/contracts.py``).
     """
     return Context(
         session_id=session_id,
@@ -108,15 +120,16 @@ def _to_candidates(rows: list[tuple[str, float]]) -> list[Candidate]:
 def _rank(candidates: list[Candidate], top_k: int) -> RankingResult:
     """CP 1.5 - sort candidates by BM25 score (higher = better), keep Top-k.
 
-    Python's sort is stable, so candidates with an equal score keep their
-    retrieval order. ``diagnostics`` here is minimal and provisional; the
-    full ranking-diagnostics schema is CP 6.7.
+    ``top_k`` is clamped to the frozen maximum (10); a larger value cannot
+    produce a longer list. Python's sort is stable, so candidates with an
+    equal score keep their retrieval order. ``diagnostics`` here is minimal
+    and provisional; the full ranking-diagnostics schema is CP 6.7.
     """
     ordered = sorted(
         candidates,
         key=lambda candidate: candidate.route_scores.get("bm25", float("-inf")),
         reverse=True,
-    )[: max(0, top_k)]
+    )[: _effective_k(top_k)]
     diagnostics = {
         candidate.parent_asin: {
             "rank": index + 1,
@@ -131,12 +144,13 @@ def _to_response(result: RankingResult, top_k: int) -> dict:
     """CP 1.6 - RankingResult -> evaluator-compatible respond() payload.
 
     ``message`` is the baseline string, ``ask_attribute`` is ``None`` (no
-    clarification yet), and ``recommendations`` is at most ``top_k``
-    ``{"parent_asin": ...}`` entries in ranked order.
+    clarification yet), and ``recommendations`` is at most 10
+    ``{"parent_asin": ...}`` entries in ranked order -- the frozen maximum
+    is enforced here regardless of ``top_k``.
     """
     recommendations = [
         {"parent_asin": candidate.parent_asin}
-        for candidate in result.ranked[: max(0, top_k)]
+        for candidate in result.ranked[: _effective_k(top_k)]
     ]
     return {
         "message": _RESPONSE_MESSAGE,

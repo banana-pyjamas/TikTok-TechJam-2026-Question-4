@@ -178,6 +178,14 @@ class RankTest(unittest.TestCase):
         result = _rank(self._candidates(*[(f"P{i}", float(i)) for i in range(20)]), 10)
         self.assertEqual(len(result.ranked), 10)
 
+    def test_top_k_above_frozen_max_is_clamped_to_10(self) -> None:
+        many = self._candidates(*[(f"P{i}", float(i)) for i in range(50)])
+        for oversized in (11, 25, 100):
+            self.assertEqual(len(_rank(many, oversized).ranked), 10, oversized)
+
+    def test_negative_top_k_yields_empty(self) -> None:
+        self.assertEqual(_rank(self._candidates(("A", 1.0)), -5).ranked, [])
+
     def test_returns_ranking_result_with_rank_diagnostics(self) -> None:
         result = _rank(self._candidates(("A", 2.0), ("B", 1.0)), 10)
         self.assertIsInstance(result, RankingResult)
@@ -194,8 +202,11 @@ class ToResponseTest(unittest.TestCase):
     """CP 1.6 — Official response."""
 
     def _result(self, *asins: str) -> RankingResult:
-        return _rank([Candidate(parent_asin=a, route_scores={"bm25": -i})
-                      for i, a in enumerate(asins)], 100)
+        # Build the RankingResult directly (not via _rank) so _to_response's
+        # own top_k cap is what is under test, not _rank's.
+        ranked = [Candidate(parent_asin=a, route_scores={"bm25": float(-i)})
+                  for i, a in enumerate(asins)]
+        return RankingResult(ranked=ranked)
 
     def test_schema_shape(self) -> None:
         payload = _to_response(self._result("A", "B"), 10)
@@ -217,6 +228,14 @@ class ToResponseTest(unittest.TestCase):
             all(set(r) == {"parent_asin"} and isinstance(r["parent_asin"], str)
                 for r in payload["recommendations"])
         )
+
+    def test_never_exceeds_10_recommendations_even_for_large_top_k(self) -> None:
+        # CP 1.6 blocker fix: the frozen maximum of 10 holds regardless of
+        # the caller-supplied top_k.
+        result = self._result(*[f"P{i}" for i in range(40)])
+        for oversized in (11, 50, 100):
+            payload = _to_response(result, oversized)
+            self.assertLessEqual(len(payload["recommendations"]), 10, oversized)
 
     def test_empty_ranked_gives_empty_recommendations(self) -> None:
         payload = _to_response(RankingResult(), 10)
