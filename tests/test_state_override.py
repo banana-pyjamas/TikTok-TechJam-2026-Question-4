@@ -79,13 +79,48 @@ class CP33AddOperation(unittest.TestCase):
         self.assertEqual(_vals(_run("wool sweater", "plus cashmere"), "material"),
                          ["wool", "cashmere"])
 
-    def test_add_cue_beats_replace_cue_when_both_present(self) -> None:
+    def test_add_cue_beats_replace_cue_when_both_modify_one_value(self) -> None:
         state = _run("black jacket", "actually also navy")
         self.assertEqual(_vals(state, "color"), ["black", "navy"])
 
     def test_multi_valued_default_across_turns_is_still_add(self) -> None:
         self.assertEqual(_vals(_run("black shoes", "navy too? navy"), "color"),
                          ["black", "navy"])
+
+
+class CP33MixedOperations(unittest.TestCase):
+    """B CP 3.3 fix: cue is attributed per value, not message-globally."""
+
+    def _mixed(self, message: str) -> SessionState:
+        return _run("black leather jacket", message)
+
+    def test_1_golden_mixed_operation(self) -> None:
+        state = self._mixed("Actually denim, but also navy.")
+        self.assertEqual(_vals(state, "material"), ["denim"])
+        self.assertEqual(_vals(state, "color"), ["black", "navy"])
+        self.assertIn("REPLACE", _ops(state, "material"))
+        self.assertIn("ADD", _ops(state, "color"))
+        self.assertIn("leather", superseded_values(state, "material"))
+
+    def test_2_reverse_clause_order(self) -> None:
+        state = self._mixed("Also navy, but actually denim.")
+        self.assertEqual(_vals(state, "material"), ["denim"])
+        self.assertEqual(_vals(state, "color"), ["black", "navy"])
+
+    def test_3_two_replace_operations(self) -> None:
+        state = self._mixed("Actually denim and make it blue.")
+        self.assertEqual(_vals(state, "material"), ["denim"])
+        self.assertEqual(_vals(state, "color"), ["blue"])
+
+    def test_4_two_add_operations(self) -> None:
+        state = _run("black wool sweater", "Also cashmere and also navy.")
+        self.assertEqual(_vals(state, "material"), ["wool", "cashmere"])
+        self.assertEqual(_vals(state, "color"), ["black", "navy"])
+
+    def test_cue_is_not_borrowed_by_an_unrelated_slot(self) -> None:
+        # "also" governs navy only; material must still REPLACE.
+        state = self._mixed("Actually denim, also navy.")
+        self.assertNotIn("leather", _vals(state, "material"))
 
 
 class CP34RemoveOperation(unittest.TestCase):

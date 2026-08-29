@@ -37,7 +37,7 @@ import re
 from typing import Any
 
 from starter.contracts import SessionState
-from starter.text import terms
+from starter.text import STOPWORDS, TOKEN_RE, terms
 
 # Slot-marker words that carry no standalone free-text signal, so they never
 # make a message "residual" for evidence purposes.
@@ -206,61 +206,103 @@ _BUDGET_DOLLAR_RE = re.compile(r"\$\s*(\d+(?:\.\d{1,2})?)")
 _BUDGET_DOLLARS_WORD_RE = re.compile(r"\b(\d+(?:\.\d{1,2})?)\s*(?:dollars|usd|bucks)\b", re.I)
 
 
-def _extract_category(message: str) -> str | None:
-    for token in terms(message):
+def _content_tokens(message: str) -> list[tuple[str, int]]:
+    """``(lowercased token, start offset)`` for content tokens (len > 1, not
+    a stopword) -- same filter as ``text.terms`` but position-aware."""
+    out: list[tuple[str, int]] = []
+    for match in TOKEN_RE.finditer(message):
+        token = match.group(0).lower()
+        if len(token) > 1 and token not in STOPWORDS:
+            out.append((token, match.start()))
+    return out
+
+
+def _extract_category(message: str) -> list[tuple[str, int]]:
+    for token, offset in _content_tokens(message):
         canonical = _CATEGORY_KEYWORDS.get(token)
         if canonical:
-            return canonical
-    return None
+            return [(canonical, offset)]
+    return []
 
 
-def _extract_multi(message: str, vocabulary: set[str], aliases: dict[str, str]) -> list[str]:
-    seen: list[str] = []
-    for token in terms(message):
+def _extract_multi(
+    message: str, vocabulary: set[str], aliases: dict[str, str]
+) -> list[tuple[str, int]]:
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for token, offset in _content_tokens(message):
+        if token not in vocabulary:
+            continue
         value = aliases.get(token, token)
-        if token in vocabulary and value not in seen:
-            seen.append(value)
-    return seen
+        if value not in seen:
+            seen.add(value)
+            out.append((value, offset))
+    return out
 
 
-def _extract_size(message: str) -> str | None:
+def _extract_size(message: str) -> list[tuple[str, int]]:
     match = _SIZE_PREFIXED_RE.search(message) or _SIZE_STANDALONE_RE.search(message)
     if not match:
-        return None
+        return []
     raw = match.group(1).lower().replace(" ", "")
-    return _SIZE_NORMALIZE.get(raw, raw)
+    return [(_SIZE_NORMALIZE.get(raw, raw), match.start(1))]
 
 
-def _extract_brand(message: str) -> str | None:
-    match = _BRAND_PHRASE_RE.search(message)
-    if match:
-        value = match.group(1).lower()
-        return _BRAND_NORMALIZE.get(value, value)
-    match = _BRAND_KEYWORD_RE.search(message)
-    if match:
-        value = match.group(1).lower()
-        return _BRAND_NORMALIZE.get(value, value)
-    return None
+def _extract_brand(message: str) -> list[tuple[str, int]]:
+    match = _BRAND_PHRASE_RE.search(message) or _BRAND_KEYWORD_RE.search(message)
+    if not match:
+        return []
+    value = match.group(1).lower()
+    return [(_BRAND_NORMALIZE.get(value, value), match.start(1))]
 
 
 def _extract_budget(message: str) -> dict[str, Any] | None:
     match = _BUDGET_RANGE_RE.search(message)
     if match:
         low, high = sorted((float(match.group(1)), float(match.group(2))))
-        return {"raw": match.group(0).strip(), "bounds": {"min": low, "max": high}}
+        return {"raw": match.group(0).strip(), "offset": match.start(),
+                "bounds": {"min": low, "max": high}}
     match = _BUDGET_UNDER_RE.search(message)
     if match:
-        return {"raw": match.group(0).strip(), "bounds": {"min": None, "max": float(match.group(1))}}
+        return {"raw": match.group(0).strip(), "offset": match.start(),
+                "bounds": {"min": None, "max": float(match.group(1))}}
     match = _BUDGET_OVER_RE.search(message)
     if match:
-        return {"raw": match.group(0).strip(), "bounds": {"min": float(match.group(1)), "max": None}}
+        return {"raw": match.group(0).strip(), "offset": match.start(),
+                "bounds": {"min": float(match.group(1)), "max": None}}
     match = _BUDGET_AROUND_RE.search(message)
     if match:
-        return {"raw": match.group(0).strip(), "bounds": {"min": None, "max": float(match.group(1))}}
+        return {"raw": match.group(0).strip(), "offset": match.start(),
+                "bounds": {"min": None, "max": float(match.group(1))}}
     match = _BUDGET_DOLLARS_WORD_RE.search(message) or _BUDGET_DOLLAR_RE.search(message)
     if match:
-        return {"raw": match.group(0).strip(), "bounds": {"min": None, "max": float(match.group(1))}}
+        return {"raw": match.group(0).strip(), "offset": match.start(),
+                "bounds": {"min": None, "max": float(match.group(1))}}
     return None
+
+
+def _cue_spans(message: str) -> list[tuple[int, int, str]]:
+    """Every override-cue match as ``(start, end, kind)``, kind in
+    ``{"replace", "add"}``, sorted by position."""
+    spans: list[tuple[int, int, str]] = []
+    for match in _REPLACE_CUE_RE.finditer(message):
+        spans.append((match.start(), match.end(), "replace"))
+    for match in _ADD_CUE_RE.finditer(message):
+        spans.append((match.start(), match.end(), "add"))
+    return sorted(spans)
+
+
+def _governing_cue(cues: list[tuple[int, int, str]], position: int) -> str | None:
+    """The cue that governs a value at ``position``: the nearest cue,
+    preferring one that ends before the value (a modifier precedes its
+    target); a following cue is considered but penalised."""
+    best_kind: str | None = None
+    best_distance: float | None = None
+    for start, end, kind in cues:
+        distance = position - end if end <= position else (start - position) + 50
+        if best_distance is None or distance < best_distance:
+            best_distance, best_kind = distance, kind
+    return best_kind
 
 
 def _is_negated(message: str, value: str) -> bool:
@@ -290,43 +332,41 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
     Returns ``{slot: entry}`` where ``entry`` has ``values`` (positive,
     non-negated), ``cardinality``, an optional ``cue`` (``"replace"`` /
     ``"add"``), an optional ``remove`` list (negated values), and ``bounds``
-    for budget. No state is touched here -- the final REPLACE/ADD/REMOVE
-    decision is made by ``apply_delta`` against the current state.
+    for budget.
+
+    Operation cues are attributed **per value**, by proximity to the
+    governing cue -- so "Actually denim, but also navy" gives material a
+    ``replace`` cue and color an ``add`` cue in the same turn. A slot with
+    any ``replace`` value takes ``replace``; else any ``add`` -> ``add``.
+    No state is touched here.
     """
-    replace_cue = bool(_REPLACE_CUE_RE.search(message))
-    add_cue = bool(_ADD_CUE_RE.search(message))
+    cues = _cue_spans(message)
     delta: dict[str, dict[str, Any]] = {}
 
-    raw: list[tuple[str, list[str]]] = []
-    category = _extract_category(message)
-    if category:
-        raw.append(("category", [category]))
-    colors = _extract_multi(message, _COLORS, _COLOR_ALIASES)
-    if colors:
-        raw.append(("color", colors))
-    materials = _extract_multi(message, _MATERIALS, {})
-    if materials:
-        raw.append(("material", materials))
-    size = _extract_size(message)
-    if size:
-        raw.append(("size", [size]))
-    brand = _extract_brand(message)
-    if brand:
-        raw.append(("brand", [brand]))
+    positioned: list[tuple[str, list[tuple[str, int]]]] = [
+        ("category", _extract_category(message)),
+        ("color", _extract_multi(message, _COLORS, _COLOR_ALIASES)),
+        ("material", _extract_multi(message, _MATERIALS, {})),
+        ("size", _extract_size(message)),
+        ("brand", _extract_brand(message)),
+    ]
 
-    for slot, values in raw:
-        removed = [value for value in values if _is_negated(message, value)]
-        kept = [value for value in values if value not in removed]
+    for slot, pairs in positioned:
+        if not pairs:
+            continue
+        removed = [value for value, _ in pairs if _is_negated(message, value)]
+        kept = [(value, offset) for value, offset in pairs if value not in removed]
         entry: dict[str, Any] = {
-            "values": kept,
+            "values": [value for value, _ in kept],
             "cardinality": SLOT_CARDINALITY[slot],
         }
         if removed:
             entry["remove"] = removed
-        if add_cue:
-            entry["cue"] = "add"
-        elif replace_cue:
+        kinds = {_governing_cue(cues, offset) for _, offset in kept}
+        if "replace" in kinds:
             entry["cue"] = "replace"
+        elif "add" in kinds:
+            entry["cue"] = "add"
         delta[slot] = entry
 
     budget = _extract_budget(message)
@@ -336,7 +376,8 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
             "cardinality": "single",
             "bounds": budget["bounds"],
         }
-        if replace_cue and not add_cue:
+        cue = _governing_cue(cues, budget["offset"])
+        if cue == "replace":
             entry["cue"] = "replace"
         delta["budget"] = entry
 
