@@ -9,14 +9,14 @@ Single authoritative writer of ``SessionState``. Given a raw user message it:
   slot-specifically -- an override to one slot never disturbs the others
   (CP 3.2 golden);
 * accumulates the result into ``state.slots``; superseded values are marked
-  in ``state.provenance`` and any evidence entry asserting them flips to
-  ``status: "superseded"`` so it cannot resurrect (CP 3.6 / D Finding 1);
+  in ``state.provenance``;
 * records every change in ``state.provenance``;
-* keeps distilled residual free-text as ``state.evidence`` (CP 2.8). Entries
-  are ``{"turn", "text", "normalized", "status": "active"}``; ``status`` is
-  the hook Phase 3 uses to supersede free-text with the same mechanism it
-  supersedes slots, so a superseded free-text constraint cannot resurrect if
-  Phase 5 later feeds evidence into the query (D Finding 1).
+* keeps distilled residual free-text as ``state.evidence``. ``normalized`` is
+  content tokens minus override cues, plumbing words, slot-markers and every
+  extracted slot value, so an entry never carries a structured constraint --
+  superseding one slot value cannot erase unrelated intent in the same
+  entry (CP 2.8 / CP 3.6 / D Finding 1). Entries:
+  ``{"turn", "text", "normalized", "status": "active"}``.
 
 Slot value schema (approved at CP 2.1):
 
@@ -365,9 +365,16 @@ def _record(
 
 
 def _supersede_evidence(state: SessionState, dead_values: list[str]) -> None:
-    """Mark active evidence entries that assert a now-dead constraint as
-    superseded, so they cannot resurrect it if a later phase reads evidence
-    into the query (CP 3.6 / D Finding 1)."""
+    """Invalidate the stale assertion of a now-dead constraint in free-text
+    evidence, WITHOUT touching unrelated intent in the same entry
+    (CP 3.6 / D Finding 1).
+
+    Evidence is distilled to residual tokens at creation, so a dead slot
+    value normally never reaches ``normalized``. This is the safety net for
+    the case where extraction missed it: strip the dead token(s); keep the
+    entry active if meaningful residual survives, else mark the whole entry
+    superseded.
+    """
     dead_tokens: set[str] = set()
     for value in dead_values:
         dead_tokens.update(terms(str(value)))
@@ -376,7 +383,17 @@ def _supersede_evidence(state: SessionState, dead_values: list[str]) -> None:
     for entry in state.evidence:
         if not isinstance(entry, dict) or entry.get("status") != "active":
             continue
-        if set(terms(entry.get("normalized", ""))) & dead_tokens:
+        entry_tokens = terms(entry.get("normalized", ""))
+        overlap = set(entry_tokens) & dead_tokens
+        if not overlap:
+            continue
+        live = [token for token in entry_tokens if token not in dead_tokens]
+        entry["superseded_parts"] = sorted(
+            set(entry.get("superseded_parts", [])) | overlap
+        )
+        if live:
+            entry["normalized"] = " ".join(live)
+        else:
             entry["status"] = "superseded"
 
 
@@ -483,28 +500,25 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
 def update_evidence(
     state: SessionState, message: str, delta: dict[str, dict[str, Any]], turn: int
 ) -> None:
-    """CP 2.8 - keep residual free-text as distilled evidence.
+    """CP 2.8 / CP 3.6 - keep residual free-text as distilled evidence.
 
-    Stored only when the turn carries genuine user signal that did not become
-    a slot. Skipped when the message is empty, is purely a slot mention
-    (``"jacket"``), or is a conversational non-answer (``"ask me about one
-    specific attribute"``, ``"I don't have a preference..."``).
+    ``normalized`` is the DISTILLED content: message tokens minus override
+    cues, override-plumbing words, slot-marker words, and every extracted
+    slot value. So an entry never contains a structured constraint token --
+    superseding ``leather`` cannot touch an entry that only says
+    ``winter hiking`` (B Phase 3 blocker fix). An override message is not
+    skipped wholesale: its genuine residual ("actually denim for winter
+    hiking" -> ``winter hiking``) is retained.
 
-    Residual = message content tokens minus tokens already consumed by an
-    extracted slot value or a slot-marker word. ``"gift for my dad"`` ->
-    ``{gift, dad}`` -> stored once (deduped by normalized form).
-
-    Each entry is ``{"turn", "text", "normalized", "status": "active"}``.
-    The ``status`` field is the hook Phase 3 uses to supersede free-text
-    evidence with the same mechanism it supersedes slots (D Finding 1).
+    Not stored when nothing meaningful remains, or on a conversational
+    non-answer. Each entry is
+    ``{"turn", "text", "normalized", "status": "active"}``; ``text`` keeps
+    the raw message for audit, ``normalized`` shrinks as overrides invalidate
+    parts of it, ``status`` flips only when nothing live is left.
     """
     if not message or not message.strip():
         return
     if _NON_ANSWER_RE.search(message):
-        return
-    # An override instruction ("actually, ignore my earlier preference, ...")
-    # whose slots were applied is plumbing, not new free-text evidence.
-    if _REPLACE_CUE_RE.search(message) and delta:
         return
     consumed: set[str] = set(_EVIDENCE_MARKER_TOKENS) | _OVERRIDE_PLUMBING
     for incoming in delta.values():
@@ -512,12 +526,18 @@ def update_evidence(
             consumed.update(terms(value))
         for value in incoming.get("remove", ()):
             consumed.update(terms(value))
-    residual = [token for token in terms(message) if token not in consumed]
+    # Drop multi-word override cue phrases ("no wait", "scratch that", ...).
+    stripped = _ADD_CUE_RE.sub(" ", _REPLACE_CUE_RE.sub(" ", message))
+    residual = [token for token in terms(stripped) if token not in consumed]
     if not residual:
         return
-    normalized = " ".join(terms(message))
+    normalized = " ".join(residual)
     for entry in state.evidence:
-        if isinstance(entry, dict) and entry.get("normalized") == normalized:
+        if (
+            isinstance(entry, dict)
+            and entry.get("status") == "active"
+            and entry.get("normalized") == normalized
+        ):
             return
     state.evidence.append(
         {"turn": turn, "text": message, "normalized": normalized, "status": "active"}

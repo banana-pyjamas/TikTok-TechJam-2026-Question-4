@@ -136,30 +136,46 @@ class CP36NoStaleResurrection(unittest.TestCase):
                      "size 10", "under $200", "for the weekend", "black")
         self.assertNotIn("leather", _vals(state, "material"))
 
-    def test_evidence_asserting_a_superseded_value_is_marked_superseded(self) -> None:
-        # D Finding 1 golden: the free-text copy of the old constraint must
-        # not stay active.
-        state = SessionState(session_id="s")
-        update_state(state, "something in leather for winter hiking", 1)
-        self.assertEqual(state.evidence[0]["status"], "active")
-        self.assertEqual(_vals(state, "material"), ["leather"])
+    def _active_tokens(self, state: SessionState) -> set[str]:
+        out: set[str] = set()
+        for entry in state.evidence:
+            if entry.get("status") == "active":
+                out.update(entry["normalized"].split())
+        return out
 
-        update_state(state, "actually denim", 2)
+    def test_A_mixed_old_evidence_preservation(self) -> None:
+        # B TEST A: superseding "leather" must not erase "winter hiking".
+        state = _run("something in leather for winter hiking", "actually denim")
         self.assertEqual(_vals(state, "material"), ["denim"])
-        leather_evidence = [e for e in state.evidence if "leather" in e["normalized"]]
-        self.assertTrue(leather_evidence)
-        self.assertTrue(all(e["status"] == "superseded" for e in leather_evidence))
+        self.assertIn("leather", superseded_values(state, "material"))
+        active = self._active_tokens(state)
+        self.assertNotIn("leather", active, "no active evidence may still assert leather")
+        self.assertIn("winter", active)
+        self.assertIn("hiking", active)
+
+    def test_B_new_residual_information_on_override_turn(self) -> None:
+        # B TEST B: override message's genuine residual is retained.
+        state = _run("leather jacket", "actually denim for winter hiking")
+        self.assertEqual(_vals(state, "material"), ["denim"])
+        self.assertEqual(_vals(state, "category"), ["jacket"])
+        active = self._active_tokens(state)
+        self.assertIn("winter", active)
+        self.assertIn("hiking", active)
+        self.assertNotIn("leather", active)
+        self.assertNotIn("denim", active, "slot value is not free-text evidence")
+        self.assertNotIn("actually", active, "override plumbing is not evidence")
 
     def test_evidence_not_mentioning_the_dead_value_stays_active(self) -> None:
         state = SessionState(session_id="s")
-        update_state(state, "gift for my dad", 1)
-        update_state(state, "leather", 2)
+        update_state(state, "a warm gift for my dad", 1)
+        update_state(state, "leather jacket", 2)
         update_state(state, "actually denim", 3)
-        gift = [e for e in state.evidence if e["normalized"] == "gift dad"]
+        gift = [e for e in state.evidence if "dad" in e["normalized"]]
         self.assertEqual([e["status"] for e in gift], ["active"])
+        self.assertIn("warm", gift[0]["normalized"])
 
     def test_re_stating_a_value_explicitly_is_allowed(self) -> None:
-        # Not resurrection -- a fresh explicit request (principle I).
+        # B TEST E: not resurrection -- a fresh explicit request (principle I).
         state = _run("leather", "actually denim", "actually leather")
         self.assertEqual(_vals(state, "material"), ["leather"])
 
@@ -177,14 +193,16 @@ class CP37SessionIsolation(unittest.TestCase):
         self.assertEqual(superseded_values(b, "material"), set())
         self.assertEqual(_ops(b, "material"), ["ADD"])
 
-    def test_evidence_supersession_is_per_session(self) -> None:
+    def test_F_evidence_supersession_is_per_session(self) -> None:
+        import copy
         a = SessionState(session_id="A")
         b = SessionState(session_id="B")
-        update_state(a, "something in leather please", 1)
-        update_state(b, "something in leather please", 1)
+        update_state(a, "something in leather for winter hiking", 1)
+        update_state(b, "something in leather for winter hiking", 1)
+        b_snapshot = copy.deepcopy(b)
         update_state(a, "actually denim", 2)
-        self.assertEqual(a.evidence[0]["status"], "superseded")
-        self.assertEqual(b.evidence[0]["status"], "active")
+        self.assertEqual(_vals(a, "material"), ["denim"])
+        self.assertEqual(b, b_snapshot, "session B is completely untouched")
 
 
 if __name__ == "__main__":
