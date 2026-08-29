@@ -1,11 +1,16 @@
-"""Deterministic session-state manager (Phase 2).
+"""Deterministic session-state manager (Phase 2 + Phase 3).
 
 Single authoritative writer of ``SessionState``. Given a raw user message it:
 
 * extracts structured slot values with keyword / regex rules only -- no LLM,
   no network (principle J: the core must work offline);
-* accumulates them into ``state.slots`` (Phase 2 semantics: SET single-valued,
-  ADD multi-valued -- no override / supersession yet, that is Phase 3);
+* detects intent-override cues deterministically ("actually" -> REPLACE,
+  "also" -> ADD, "not leather" -> REMOVE) and applies the operation
+  slot-specifically -- an override to one slot never disturbs the others
+  (CP 3.2 golden);
+* accumulates the result into ``state.slots``; superseded values are marked
+  in ``state.provenance`` and any evidence entry asserting them flips to
+  ``status: "superseded"`` so it cannot resurrect (CP 3.6 / D Finding 1);
 * records every change in ``state.provenance``;
 * keeps distilled residual free-text as ``state.evidence`` (CP 2.8). Entries
   are ``{"turn", "text", "normalized", "status": "active"}``; ``status`` is
@@ -47,14 +52,41 @@ _EVIDENCE_MARKER_TOKENS = {
 # stored as evidence (D Finding 2). Generic phrasing, not tied to any one
 # simulator string.
 _NON_ANSWER_RE = re.compile(
-    r"ask me about"
-    r"|use your judg"
-    r"|not quite right"
-    r"|those options"
-    r"|(?:do not|don't|no|any|without) (?:really )?(?:have )?(?:an? )?"
+    r"\bask me about"
+    r"|\buse your judg"
+    r"|\bnot quite right"
+    r"|\bthose options"
+    r"|\b(?:do not|don't|no|any|without) (?:really )?(?:have )?(?:an? )?"
     r"(?:additional |particular |strong |specific |real )?preference",
     re.I,
 )
+
+# Phase 3 override cues, detected deterministically on the raw message.
+# REPLACE cue -> the new value supersedes the current one; ADD cue -> keep
+# both. Negation directly before a known value -> REMOVE it.
+_REPLACE_CUE_RE = re.compile(
+    r"\b(?:actually|instead|rather|"
+    r"scratch that|forget (?:the|that|my|about)|"
+    r"changed? my mind|second thought|"
+    r"no,? wait|wait,? no|"
+    r"make it|change (?:it |that |this )?to|switch to|swap|replace)\b",
+    re.I,
+)
+_ADD_CUE_RE = re.compile(
+    r"\b(?:also|plus|as well|in addition|additionally|and also|along with)\b", re.I
+)
+_STRONG_NEGATIONS = {
+    "without", "drop", "remove", "lose", "skip", "minus", "nix", "exclude", "ditch",
+}
+_ADJACENT_NEGATIONS = {"not", "no"}
+
+# Override-plumbing words: they appear in "actually, ignore my earlier
+# preference, ..." style messages and are not free-text evidence.
+_OVERRIDE_PLUMBING = {
+    "actually", "instead", "rather", "ignore", "forget", "earlier", "previous",
+    "prior", "preference", "preferences", "mind", "wait", "scratch",
+    "nevermind", "disregard", "what", "need", "needed",
+}
 
 SLOT_CARDINALITY: dict[str, str] = {
     "category": "single",
@@ -231,41 +263,82 @@ def _extract_budget(message: str) -> dict[str, Any] | None:
     return None
 
 
-def extract_delta(message: str) -> dict[str, dict[str, Any]]:
-    """Deterministic slot extraction for one message.
+def _is_negated(message: str, value: str) -> bool:
+    """True if ``value`` appears negated in ``message`` ("not leather",
+    "without the leather", "don't want leather")."""
+    tokens = re.findall(r"[a-z']+", message.lower())
+    value_tokens = value.lower().split()
+    span = len(value_tokens)
+    for index in range(len(tokens) - span + 1):
+        if tokens[index:index + span] != value_tokens:
+            continue
+        window = tokens[max(0, index - 3):index]
+        if not window:
+            continue
+        if any(word in _STRONG_NEGATIONS for word in window):
+            return True
+        if window[-1] in _ADJACENT_NEGATIONS:
+            return True
+        if {"don't", "dont"} & set(window) and {"want", "need"} & set(window):
+            return True
+    return False
 
-    Returns ``{slot: {"values": [...], "cardinality": ...}}`` for slots that
-    matched. ``budget`` also carries ``"bounds"``. No state is touched here.
+
+def extract_delta(message: str) -> dict[str, dict[str, Any]]:
+    """Deterministic slot + operation extraction for one message.
+
+    Returns ``{slot: entry}`` where ``entry`` has ``values`` (positive,
+    non-negated), ``cardinality``, an optional ``cue`` (``"replace"`` /
+    ``"add"``), an optional ``remove`` list (negated values), and ``bounds``
+    for budget. No state is touched here -- the final REPLACE/ADD/REMOVE
+    decision is made by ``apply_delta`` against the current state.
     """
+    replace_cue = bool(_REPLACE_CUE_RE.search(message))
+    add_cue = bool(_ADD_CUE_RE.search(message))
     delta: dict[str, dict[str, Any]] = {}
 
+    raw: list[tuple[str, list[str]]] = []
     category = _extract_category(message)
     if category:
-        delta["category"] = {"values": [category], "cardinality": "single"}
-
+        raw.append(("category", [category]))
     colors = _extract_multi(message, _COLORS, _COLOR_ALIASES)
     if colors:
-        delta["color"] = {"values": colors, "cardinality": "multi"}
-
+        raw.append(("color", colors))
     materials = _extract_multi(message, _MATERIALS, {})
     if materials:
-        delta["material"] = {"values": materials, "cardinality": "multi"}
-
+        raw.append(("material", materials))
     size = _extract_size(message)
     if size:
-        delta["size"] = {"values": [size], "cardinality": "single"}
-
+        raw.append(("size", [size]))
     brand = _extract_brand(message)
     if brand:
-        delta["brand"] = {"values": [brand], "cardinality": "single"}
+        raw.append(("brand", [brand]))
+
+    for slot, values in raw:
+        removed = [value for value in values if _is_negated(message, value)]
+        kept = [value for value in values if value not in removed]
+        entry: dict[str, Any] = {
+            "values": kept,
+            "cardinality": SLOT_CARDINALITY[slot],
+        }
+        if removed:
+            entry["remove"] = removed
+        if add_cue:
+            entry["cue"] = "add"
+        elif replace_cue:
+            entry["cue"] = "replace"
+        delta[slot] = entry
 
     budget = _extract_budget(message)
     if budget:
-        delta["budget"] = {
+        entry = {
             "values": [budget["raw"]],
             "cardinality": "single",
             "bounds": budget["bounds"],
         }
+        if replace_cue and not add_cue:
+            entry["cue"] = "replace"
+        delta["budget"] = entry
 
     return delta
 
@@ -275,52 +348,136 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-def _record(state: SessionState, turn: int, slot: str, op: str, value: str) -> None:
-    state.provenance.append(
-        {"turn": turn, "slot": slot, "op": op, "value": value, "source": "extractor"}
-    )
+def _record(
+    state: SessionState,
+    turn: int,
+    slot: str,
+    op: str,
+    value: str,
+    superseded: list[str] | None = None,
+) -> None:
+    entry: dict[str, Any] = {
+        "turn": turn, "slot": slot, "op": op, "value": value, "source": "extractor",
+    }
+    if superseded:
+        entry["superseded"] = list(superseded)
+    state.provenance.append(entry)
+
+
+def _supersede_evidence(state: SessionState, dead_values: list[str]) -> None:
+    """Mark active evidence entries that assert a now-dead constraint as
+    superseded, so they cannot resurrect it if a later phase reads evidence
+    into the query (CP 3.6 / D Finding 1)."""
+    dead_tokens: set[str] = set()
+    for value in dead_values:
+        dead_tokens.update(terms(str(value)))
+    if not dead_tokens:
+        return
+    for entry in state.evidence:
+        if not isinstance(entry, dict) or entry.get("status") != "active":
+            continue
+        if set(terms(entry.get("normalized", ""))) & dead_tokens:
+            entry["status"] = "superseded"
+
+
+def superseded_values(state: SessionState, slot: str) -> set[str]:
+    """Every value ever displaced from ``slot`` (from provenance)."""
+    out: set[str] = set()
+    for record in state.provenance:
+        if record.get("slot") == slot:
+            out.update(record.get("superseded", []))
+            if record.get("op") == "REMOVE":
+                out.add(record.get("value"))
+    return out
 
 
 def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int) -> None:
-    """Accumulate a delta into ``state.slots`` (Phase 2 semantics).
+    """Apply a delta to ``state.slots`` -- the single authoritative write.
 
-    * multi-valued slot: ADD new values (union, dedup, retrieval order kept);
-    * single-valued slot: SET (last write wins) unless the value and bounds
-      are already what is stored.
+    Phase 2 accumulation plus Phase 3 operations:
 
-    No slot the delta does not mention is touched -- that is what makes a
-    stored constraint persist across later turns (CP 2.2).
+    * ``remove`` values -> REMOVE (strip from the slot; supersede evidence);
+    * positive values with an ``add`` cue -> ADD (union);
+    * positive values with a ``replace`` cue over an existing value, or any
+      new value for a single-valued slot -> REPLACE (old values superseded);
+    * otherwise the Phase 2 default: ADD for multi-valued, first-time SET for
+      single-valued.
+
+    A slot the delta does not mention is never touched (CP 2.2). Superseded
+    values do not spontaneously return (CP 3.6): later turns only re-add a
+    value if the message states it again.
     """
     for slot, incoming in delta.items():
         cardinality = incoming["cardinality"]
+        remove = list(incoming.get("remove") or [])
+        values = list(incoming.get("values") or [])
+        cue = incoming.get("cue")
+        new_bounds = incoming.get("bounds")
         existing = state.slots.get(slot)
+        existing_values = list(existing["values"]) if existing else []
 
-        if cardinality == "multi":
-            current: list[str] = list(existing["values"]) if existing else []
-            added = [v for v in incoming["values"] if v not in current]
+        # 1. REMOVE negated values.
+        if remove:
+            survivors = [v for v in existing_values if v not in remove]
+            for value in remove:
+                _record(state, turn, slot, "REMOVE", value)
+            _supersede_evidence(state, remove)
+            existing_values = survivors
+            if not values:
+                if survivors:
+                    state.slots[slot] = {"values": survivors, "cardinality": cardinality}
+                else:
+                    state.slots.pop(slot, None)
+                continue
+
+        if not values:
+            continue
+
+        # 2. Decide the operation for the positive values.
+        if cue == "add":
+            operation = "ADD"
+        elif remove:
+            operation = "REPLACE"
+        elif cue == "replace" and existing_values:
+            operation = "REPLACE"
+        elif cardinality == "single":
+            operation = "REPLACE"
+        else:
+            operation = "ADD"
+
+        if operation == "ADD":
+            added = [v for v in values if v not in existing_values]
             if not added:
                 continue
-            state.slots[slot] = {
-                "values": current + added,
-                "cardinality": "multi",
+            entry: dict[str, Any] = {
+                "values": existing_values + added, "cardinality": cardinality,
             }
+            if new_bounds is not None:
+                entry["bounds"] = new_bounds
+            state.slots[slot] = entry
             for value in added:
                 _record(state, turn, slot, "ADD", value)
             continue
 
-        new_value = incoming["values"][0]
-        new_bounds = incoming.get("bounds")
-        if (
-            existing
-            and existing["values"] == [new_value]
+        # REPLACE (or first-time SET when nothing was there).
+        superseded = [v for v in existing_values if v not in values]
+        unchanged = (
+            existing is not None
+            and existing["values"] == values
             and existing.get("bounds") == new_bounds
-        ):
+            and not remove
+        )
+        if unchanged:
             continue
-        entry: dict[str, Any] = {"values": [new_value], "cardinality": "single"}
+        entry = {"values": list(values), "cardinality": cardinality}
         if new_bounds is not None:
             entry["bounds"] = new_bounds
         state.slots[slot] = entry
-        _record(state, turn, slot, "SET", new_value)
+        op_name = "REPLACE" if (existing_values or remove) else "SET"
+        for value in values:
+            _record(state, turn, slot, op_name, value, superseded or None)
+        if superseded:
+            _supersede_evidence(state, superseded)
 
 
 def update_evidence(
@@ -345,9 +502,15 @@ def update_evidence(
         return
     if _NON_ANSWER_RE.search(message):
         return
-    consumed: set[str] = set(_EVIDENCE_MARKER_TOKENS)
+    # An override instruction ("actually, ignore my earlier preference, ...")
+    # whose slots were applied is plumbing, not new free-text evidence.
+    if _REPLACE_CUE_RE.search(message) and delta:
+        return
+    consumed: set[str] = set(_EVIDENCE_MARKER_TOKENS) | _OVERRIDE_PLUMBING
     for incoming in delta.values():
-        for value in incoming["values"]:
+        for value in incoming.get("values", ()):
+            consumed.update(terms(value))
+        for value in incoming.get("remove", ()):
             consumed.update(terms(value))
     residual = [token for token in terms(message) if token not in consumed]
     if not residual:
