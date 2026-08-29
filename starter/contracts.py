@@ -25,9 +25,12 @@ Principles enforced by these shapes:
   phases without mutating this frozen contract. Candidate-scoped SCORE
   normalization is still forbidden; ``route_scores`` carries raw route scores.
 * Every type is constructible with no arguments and is safe to use in that
-  empty form. An explicit ``None`` passed for a container-typed field at
-  construction is normalized to the empty container (CP 0.4 None rule);
-  scalar fields are not coerced.
+  empty form. An explicit ``None`` passed for ANY field at construction is
+  normalized to that field's declared default (CP 0.4 frozen None rule):
+  ``""`` / ``0`` / ``"unknown"`` for scalars, a fresh empty container for
+  dict/list fields, ``SessionState()`` for ``Context.state``. Construction
+  never raises on ``None``; the resulting object always satisfies its own
+  type contract.
 
 This module defines data shapes only. It contains no retrieval, ranking, or
 state-mutation behavior and is imported by no production code yet.
@@ -35,7 +38,7 @@ state-mutation behavior and is imported by no production code yet.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from typing import Any
 
 __all__ = [
@@ -47,15 +50,24 @@ __all__ = [
 ]
 
 
-def _coalesce_none(value: Any, factory: Any) -> Any:
-    """CP 0.4 frozen None rule for container-typed fields.
+def _normalize_none_fields(instance: Any) -> None:
+    """CP 0.4 frozen None rule.
 
-    An explicit ``None`` supplied for a ``dict`` / ``list`` field (or the
-    nested ``Context.state``) at construction time is normalized to a fresh
-    empty container. Scalar fields (``str`` / ``int``) are never coerced:
-    passing ``None`` there is a caller error the contract does not mask.
+    Any field left as ``None`` after construction is replaced by that
+    field's declared default -- ``field.default`` for scalars (``""``,
+    ``0``, ``"unknown"``) or ``field.default_factory()`` for containers and
+    ``Context.state`` (a fresh empty ``dict`` / ``list`` / ``SessionState``).
+    Passing ``None`` is a caller error; the contract neither raises nor
+    invents an out-of-contract value -- it falls back to the same default
+    the no-argument constructor would use. Runs at construction only;
+    assigning ``None`` afterwards is out of scope.
     """
-    return factory() if value is None else value
+    for spec in fields(instance):
+        if getattr(instance, spec.name) is None:
+            if spec.default_factory is not MISSING:  # type: ignore[misc]
+                setattr(instance, spec.name, spec.default_factory())
+            elif spec.default is not MISSING:
+                setattr(instance, spec.name, spec.default)
 
 
 @dataclass
@@ -95,10 +107,7 @@ class SessionState:
     provenance: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.user_profile = _coalesce_none(self.user_profile, dict)
-        self.slots = _coalesce_none(self.slots, dict)
-        self.evidence = _coalesce_none(self.evidence, list)
-        self.provenance = _coalesce_none(self.provenance, list)
+        _normalize_none_fields(self)
 
 
 @dataclass
@@ -119,8 +128,7 @@ class Context:
     derived: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.state = _coalesce_none(self.state, SessionState)
-        self.derived = _coalesce_none(self.derived, dict)
+        _normalize_none_fields(self)
 
 
 @dataclass
@@ -142,9 +150,7 @@ class Strategy:
     params: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.routes = _coalesce_none(self.routes, list)
-        self.route_weights = _coalesce_none(self.route_weights, dict)
-        self.params = _coalesce_none(self.params, dict)
+        _normalize_none_fields(self)
 
 
 @dataclass
@@ -169,8 +175,7 @@ class Candidate:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.route_scores = _coalesce_none(self.route_scores, dict)
-        self.metadata = _coalesce_none(self.metadata, dict)
+        _normalize_none_fields(self)
 
     @property
     def route_sources(self) -> tuple[str, ...]:
@@ -197,5 +202,4 @@ class RankingResult:
     diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.ranked = _coalesce_none(self.ranked, list)
-        self.diagnostics = _coalesce_none(self.diagnostics, dict)
+        _normalize_none_fields(self)

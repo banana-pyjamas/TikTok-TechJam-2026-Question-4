@@ -8,8 +8,10 @@ Covers:
   fails here on purpose.
 * CP 0.4 — every type is constructible with no arguments, empty instances
   are safe to use, mutable defaults are not shared between instances, and
-  the frozen None rule (container fields normalize ``None`` -> empty; scalar
-  fields pass ``None`` through untouched) holds.
+  the frozen None rule holds: passing ``None`` for ANY field at construction
+  yields that field's declared default (``""`` / ``0`` / ``"unknown"`` for
+  scalars, a fresh empty container for dict/list, ``SessionState()`` for
+  ``Context.state``); construction never raises.
 """
 
 from __future__ import annotations
@@ -66,13 +68,32 @@ FROZEN_FIELDS: dict[type, dict[str, str]] = {
     },
 }
 
-# Container fields governed by the CP 0.4 None rule (None -> empty container).
-CONTAINER_FIELDS: dict[type, list[str]] = {
-    SessionState: ["user_profile", "slots", "evidence", "provenance"],
-    Context: ["state", "derived"],
-    Strategy: ["routes", "route_weights", "params"],
-    Candidate: ["route_scores", "metadata"],
-    RankingResult: ["ranked", "diagnostics"],
+# CP 0.4 frozen None rule: passing None for ANY field at construction yields
+# that field's declared default. Expected value per field when None is passed.
+NONE_NORMALIZED_DEFAULTS: dict[type, dict[str, object]] = {
+    SessionState: {
+        "session_id": "",
+        "user_profile": {},
+        "turn": 0,
+        "slots": {},
+        "evidence": [],
+        "provenance": [],
+    },
+    Context: {
+        "session_id": "",
+        "turn": 0,
+        "user_message": "",
+        "state": SessionState(),
+        "derived": {},
+    },
+    Strategy: {
+        "mode": "unknown",
+        "routes": [],
+        "route_weights": {},
+        "params": {},
+    },
+    Candidate: {"parent_asin": "", "route_scores": {}, "metadata": {}},
+    RankingResult: {"ranked": [], "diagnostics": {}},
 }
 
 
@@ -234,36 +255,36 @@ class EmptyObjectsTest(unittest.TestCase):
 
 
 class NoneHandlingTest(unittest.TestCase):
-    """CP 0.4 blocker fix — frozen None rule."""
+    """CP 0.4 blocker fix — frozen None rule (containers AND scalars)."""
 
-    def test_none_for_container_fields_normalizes_to_empty(self) -> None:
-        self.assertEqual(SessionState(user_profile=None).user_profile, {})
-        self.assertEqual(SessionState(slots=None).slots, {})
-        self.assertEqual(SessionState(evidence=None).evidence, [])
-        self.assertEqual(SessionState(provenance=None).provenance, [])
+    def test_none_for_any_field_normalizes_to_its_declared_default(self) -> None:
+        for type_, expected in NONE_NORMALIZED_DEFAULTS.items():
+            for name, want in expected.items():
+                got = getattr(type_(**{name: None}), name)
+                self.assertEqual(got, want, f"{type_.__name__}.{name}")
 
-        self.assertIsInstance(Context(state=None).state, SessionState)
-        self.assertEqual(Context(derived=None).derived, {})
+    def test_scalar_none_normalizes_to_declared_default(self) -> None:
+        # B recommended table.
+        self.assertEqual(SessionState(session_id=None).session_id, "")
+        self.assertEqual(SessionState(turn=None).turn, 0)
+        self.assertEqual(Context(session_id=None).session_id, "")
+        self.assertEqual(Context(turn=None).turn, 0)
+        self.assertEqual(Context(user_message=None).user_message, "")
+        self.assertEqual(Strategy(mode=None).mode, "unknown")
+        self.assertEqual(Candidate(parent_asin=None).parent_asin, "")
 
-        self.assertEqual(Strategy(routes=None).routes, [])
-        self.assertEqual(Strategy(route_weights=None).route_weights, {})
-        self.assertEqual(Strategy(params=None).params, {})
+    def test_constructing_with_every_field_none_yields_the_default_instance(self) -> None:
+        # Strongest coverage guard: no field can be None after construction,
+        # and any field added later is covered automatically.
+        for type_ in FROZEN_FIELDS:
+            all_none = {f.name: None for f in fields(type_)}
+            self.assertEqual(type_(**all_none), type_(), type_.__name__)
 
-        self.assertEqual(Candidate(route_scores=None).route_scores, {})
-        self.assertEqual(Candidate(metadata=None).metadata, {})
-
-        self.assertEqual(RankingResult(ranked=None).ranked, [])
-        self.assertEqual(RankingResult(diagnostics=None).diagnostics, {})
-
-    def test_container_fields_listed_for_none_rule_match_contract(self) -> None:
-        # Every non-scalar field must be covered by the None rule.
-        for type_, covered in CONTAINER_FIELDS.items():
-            container_like = [
-                f.name
-                for f in fields(type_)
-                if _norm(str(f.type)) not in {"str", "int", "float", "bool"}
-            ]
-            self.assertEqual(sorted(container_like), sorted(covered), type_.__name__)
+    def test_none_normalized_defaults_table_covers_every_field(self) -> None:
+        for type_, expected in NONE_NORMALIZED_DEFAULTS.items():
+            self.assertEqual(
+                set(expected), {f.name for f in fields(type_)}, type_.__name__
+            )
 
     def test_normalized_none_containers_are_independent_instances(self) -> None:
         a = SessionState(slots=None)
@@ -276,14 +297,18 @@ class NoneHandlingTest(unittest.TestCase):
         c.route_scores["bm25"] = 1.0
         self.assertEqual(d.route_scores, {})
 
-    def test_scalar_none_passes_through_untouched(self) -> None:
-        # Frozen rule: scalar fields are the caller's responsibility.
-        # Construction must not raise; the value is not coerced.
-        self.assertIsNone(SessionState(session_id=None).session_id)
-        self.assertIsNone(SessionState(turn=None).turn)
-        self.assertIsNone(Context(user_message=None).user_message)
-        self.assertIsNone(Strategy(mode=None).mode)
-        self.assertIsNone(Candidate(parent_asin=None).parent_asin)
+        e = Context(state=None)
+        f = Context(state=None)
+        e.state.slots["color"] = "black"
+        self.assertEqual(f.state.slots, {})
+
+    def test_construction_never_raises_on_none(self) -> None:
+        for type_ in FROZEN_FIELDS:
+            for spec in fields(type_):
+                try:
+                    type_(**{spec.name: None})
+                except Exception as exc:  # pragma: no cover - regression guard
+                    self.fail(f"{type_.__name__}({spec.name}=None) raised {exc!r}")
 
 
 if __name__ == "__main__":

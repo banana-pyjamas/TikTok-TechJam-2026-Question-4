@@ -99,17 +99,31 @@ future routes/knobs do NOT need an interface change:
 - new slot-level signals (EC, MR, ...) go inside `SessionState.slots`
   entries — never a top-level field.
 
-## Frozen None rule (CP 0.4)
+## Frozen None rule (CP 0.4, revised after B re-review)
 
-At **construction time**:
+At **construction time**, an explicit `None` passed for **any** field is
+normalized to that field's **declared default** in `__post_init__`
+(`_normalize_none_fields`):
 
-- **Container-typed fields** (`dict`, `list`, and the nested
-  `Context.state`): an explicit `None` is normalized to a fresh empty
-  container in `__post_init__`.
-- **Scalar-typed fields** (`str`, `int`): `None` is **not** coerced.
-  Passing `None` is a caller error; the contract neither raises nor masks
-  it. Construction still succeeds so a malformed caller cannot crash the
-  agent at build time.
+| Field | `None` becomes |
+| --- | --- |
+| `SessionState.session_id`, `Context.session_id`, `Context.user_message`, `Candidate.parent_asin` | `""` |
+| `SessionState.turn`, `Context.turn` | `0` |
+| `Strategy.mode` | `"unknown"` |
+| any `dict` field | fresh `{}` |
+| any `list` field | fresh `[]` |
+| `Context.state` | fresh `SessionState()` |
 
-Post-construction assignment to `None` is out of scope for this rule.
-Enforced by `tests/test_contracts.py::NoneHandlingTest`.
+Rationale: passing `None` is a caller error, but the contract must not (a)
+raise at build time and let a malformed caller crash the agent, nor (b)
+leave an out-of-contract value (`session_id=None` when the type says `str`)
+to blow up in a later checkpoint. Falling back to the same default the
+no-argument constructor uses satisfies both.
+
+The mechanism is generic — it reads `field.default` / `field.default_factory`
+— so any field added by a future approved change is covered automatically.
+
+Post-construction assignment to `None` (`state.turn = None` after the fact)
+is out of scope. Enforced by `tests/test_contracts.py::NoneHandlingTest`
+(`test_constructing_with_every_field_none_yields_the_default_instance` is the
+coverage guard).
