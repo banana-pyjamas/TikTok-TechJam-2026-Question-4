@@ -27,8 +27,9 @@ reviewers who report reproducible failures; they do not edit production code.
 ## Reviewer-required outputs (what A must expose to B / C / D)
 
 ### B — Retrieval Guardian
-- `Candidate` objects carrying `parent_asin`, `route_sources`, and separate
-  `bm25_score` / `category_score` / `attribute_score`.
+- `Candidate` objects carrying `parent_asin`, `metadata`, and a generic
+  `route_scores` dict (one raw score per contributing route, keyed by route
+  name). `Candidate.route_sources` is a derived property listing those keys.
 - The candidate pool **before ranking** must be inspectable (route diagnostics,
   candidate coverage, per-route contribution counts).
 - Metrics B computes against that pool: Recall@50 / @100 / @300, candidate

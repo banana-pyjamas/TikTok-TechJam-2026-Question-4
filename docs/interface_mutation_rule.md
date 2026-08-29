@@ -53,16 +53,63 @@ Affected modules:
 
 ## Enforcement
 
-`tests/test_contracts.py` asserts the exact field-name set of each frozen
-type. Any unapproved edit to `starter/contracts.py` fails that test.
-Updating the assertion is only legitimate as step 4 of an approved request.
+`tests/test_contracts.py::FreezeGuardTest` asserts the exact field-name set,
+field order, **and field type string** of each frozen type. Any unapproved
+edit to `starter/contracts.py` (rename, reorder, add, remove, or retype a
+field) fails that test. Updating the `FROZEN_FIELDS` mapping is only
+legitimate as step 4 of an approved request.
 
-## Current frozen field sets (CP 0.2)
+## Current frozen fields and types (CP 0.2, revised after B review)
 
-| Type | Fields |
-| --- | --- |
-| `SessionState` | `session_id`, `user_profile`, `turn`, `slots`, `evidence`, `provenance` |
-| `Context` | `session_id`, `turn`, `user_message`, `state` |
-| `Strategy` | `mode`, `routes` |
-| `Candidate` | `parent_asin`, `route_sources`, `bm25_score`, `category_score`, `attribute_score`, `metadata` |
-| `RankingResult` | `ranked`, `diagnostics` |
+| Type | Field | Type |
+| --- | --- | --- |
+| `SessionState` | `session_id` | `str` |
+| `SessionState` | `user_profile` | `dict[str, Any]` |
+| `SessionState` | `turn` | `int` |
+| `SessionState` | `slots` | `dict[str, Any]` |
+| `SessionState` | `evidence` | `list[Any]` |
+| `SessionState` | `provenance` | `list[dict[str, Any]]` |
+| `Context` | `session_id` | `str` |
+| `Context` | `turn` | `int` |
+| `Context` | `user_message` | `str` |
+| `Context` | `state` | `SessionState` |
+| `Context` | `derived` | `dict[str, Any]` |
+| `Strategy` | `mode` | `str` |
+| `Strategy` | `routes` | `list[str]` |
+| `Strategy` | `route_weights` | `dict[str, float]` |
+| `Strategy` | `params` | `dict[str, Any]` |
+| `Candidate` | `parent_asin` | `str` |
+| `Candidate` | `route_scores` | `dict[str, float]` |
+| `Candidate` | `metadata` | `dict[str, Any]` |
+| `RankingResult` | `ranked` | `list[Candidate]` |
+| `RankingResult` | `diagnostics` | `dict[str, dict[str, Any]]` |
+
+`Candidate.route_sources` is a **derived read-only property** (routes present
+in `route_scores`, in insertion order), not a frozen field.
+
+### Extensibility rule (added after B review)
+
+Per-route scores and strategy parameters live in generic containers so
+future routes/knobs do NOT need an interface change:
+
+- a new retrieval route adds a **key** to `Candidate.route_scores` and
+  `Strategy.route_weights` / `Strategy.routes` — never a field;
+- a new strategy parameter goes in `Strategy.params`;
+- a new per-turn computed input goes in `Context.derived`;
+- new slot-level signals (EC, MR, ...) go inside `SessionState.slots`
+  entries — never a top-level field.
+
+## Frozen None rule (CP 0.4)
+
+At **construction time**:
+
+- **Container-typed fields** (`dict`, `list`, and the nested
+  `Context.state`): an explicit `None` is normalized to a fresh empty
+  container in `__post_init__`.
+- **Scalar-typed fields** (`str`, `int`): `None` is **not** coerced.
+  Passing `None` is a caller error; the contract neither raises nor masks
+  it. Construction still succeeds so a malformed caller cannot crash the
+  agent at build time.
+
+Post-construction assignment to `None` is out of scope for this rule.
+Enforced by `tests/test_contracts.py::NoneHandlingTest`.
