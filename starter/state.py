@@ -7,7 +7,11 @@ Single authoritative writer of ``SessionState``. Given a raw user message it:
 * accumulates them into ``state.slots`` (Phase 2 semantics: SET single-valued,
   ADD multi-valued -- no override / supersession yet, that is Phase 3);
 * records every change in ``state.provenance``;
-* keeps residual free-text as ``state.evidence`` (CP 2.8).
+* keeps distilled residual free-text as ``state.evidence`` (CP 2.8). Entries
+  are ``{"turn", "text", "normalized", "status": "active"}``; ``status`` is
+  the hook Phase 3 uses to supersede free-text with the same mechanism it
+  supersedes slots, so a superseded free-text constraint cannot resurrect if
+  Phase 5 later feeds evidence into the query (D Finding 1).
 
 Slot value schema (approved at CP 2.1):
 
@@ -37,6 +41,20 @@ _EVIDENCE_MARKER_TOKENS = {
     "price", "cost", "costs", "dollars", "usd", "bucks", "under", "around",
     "about", "approximately", "roughly", "over", "above", "below",
 }
+
+# Conversational non-answers -- the customer declining to add information or
+# telling the agent to proceed. These carry no user intent and must not be
+# stored as evidence (D Finding 2). Generic phrasing, not tied to any one
+# simulator string.
+_NON_ANSWER_RE = re.compile(
+    r"ask me about"
+    r"|use your judg"
+    r"|not quite right"
+    r"|those options"
+    r"|(?:do not|don't|no|any|without) (?:really )?(?:have )?(?:an? )?"
+    r"(?:additional |particular |strong |specific |real )?preference",
+    re.I,
+)
 
 SLOT_CARDINALITY: dict[str, str] = {
     "category": "single",
@@ -118,14 +136,17 @@ _SIZE_NORMALIZE = {
 }
 
 # Known brands; multi-word entries matched as phrases (longest first).
+# Brands that are also ordinary English words (gap, lee, coach, champion,
+# polo, columbia, fossil) are deliberately excluded -- on this dataset they
+# are pure false-positive surface for near-zero yield (D Finding 3).
 _BRANDS = {
     "nike", "adidas", "puma", "reebok", "new balance", "asics", "brooks",
     "saucony", "converse", "vans", "skechers", "crocs", "timberland", "ugg",
     "birkenstock", "clarks", "dr martens", "under armour", "the north face",
-    "patagonia", "columbia", "carhartt", "levi", "levis", "wrangler", "lee",
-    "gap", "old navy", "uniqlo", "zara", "h&m", "hanes", "champion", "fila",
-    "calvin klein", "tommy hilfiger", "ralph lauren", "polo", "lacoste",
-    "gucci", "prada", "coach", "michael kors", "kate spade", "fossil",
+    "patagonia", "carhartt", "levi", "levis", "wrangler",
+    "old navy", "uniqlo", "zara", "h&m", "hanes", "fila",
+    "calvin klein", "tommy hilfiger", "ralph lauren", "lacoste",
+    "gucci", "prada", "michael kors", "kate spade",
     "citizen", "seiko", "casio", "timex", "swatch",
 }
 _BRAND_NORMALIZE = {"levis": "levi"}
@@ -305,15 +326,24 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
 def update_evidence(
     state: SessionState, message: str, delta: dict[str, dict[str, Any]], turn: int
 ) -> None:
-    """CP 2.8 - keep residual free-text as evidence.
+    """CP 2.8 - keep residual free-text as distilled evidence.
+
+    Stored only when the turn carries genuine user signal that did not become
+    a slot. Skipped when the message is empty, is purely a slot mention
+    (``"jacket"``), or is a conversational non-answer (``"ask me about one
+    specific attribute"``, ``"I don't have a preference..."``).
 
     Residual = message content tokens minus tokens already consumed by an
-    extracted slot value. If anything is left (``"gift for my dad"`` ->
-    ``{gift, dad}``), store the raw message once, deduped by normalized form.
-    A message that is purely a slot mention (``"jacket"``) leaves no residual
-    and is not stored.
+    extracted slot value or a slot-marker word. ``"gift for my dad"`` ->
+    ``{gift, dad}`` -> stored once (deduped by normalized form).
+
+    Each entry is ``{"turn", "text", "normalized", "status": "active"}``.
+    The ``status`` field is the hook Phase 3 uses to supersede free-text
+    evidence with the same mechanism it supersedes slots (D Finding 1).
     """
     if not message or not message.strip():
+        return
+    if _NON_ANSWER_RE.search(message):
         return
     consumed: set[str] = set(_EVIDENCE_MARKER_TOKENS)
     for incoming in delta.values():
@@ -326,7 +356,9 @@ def update_evidence(
     for entry in state.evidence:
         if isinstance(entry, dict) and entry.get("normalized") == normalized:
             return
-    state.evidence.append({"turn": turn, "text": message, "normalized": normalized})
+    state.evidence.append(
+        {"turn": turn, "text": message, "normalized": normalized, "status": "active"}
+    )
 
 
 def update_state(state: SessionState, message: object, turn: object) -> SessionState:
