@@ -50,14 +50,33 @@ _RRF_K = 60
 
 POOL_LIMIT = 300
 
-# The routes the agent actually runs. Measured, not assumed:
-#   bm25 only                    TS 0.131194
-#   bm25 + category                 0.134566   <- shipped
-#   bm25 + category + attribute     0.115512
-# The attribute route is excluded because it costs 0.019 -- it re-ranks on
-# terms the BM25 route already covers, and its unique candidates arrive too
-# far down to help. This is a retrieval constant, not a per-turn decision:
-# selecting per mode was measured worth +0.000298 and is not worth a knob.
+# The routes the agent actually runs. Chosen on CANDIDATE RECALL, which is
+# retrieval's own metric and where the difference is established; NOT on the
+# technical score, where it is not. Both halves matter, so both are stated.
+#
+# Recall of the hidden target over the live dialogue, session-level, paired
+# McNemar vs bm25 alone (``python3 -m tools.phase9_retrieval_evidence``):
+#
+#                                 @50      @100      @300   vs bm25 @300
+#   bm25 only                  0.3800    0.5300    0.7700   --
+#   bm25 + category            0.4150    0.5650    0.8100   +8, 9/1, p = 0.0215
+#   bm25 + cat + attribute     0.4000    0.5450    0.7950   +5, 8/3, p = 0.2266
+#
+# The category route is established at every K. The attribute route is not
+# established on recall at any K, and costs 0.019 TS -- it re-ranks on terms
+# the BM25 route already covers, and its unique candidates arrive too far down
+# to help. So it is excluded.
+#
+# What this comment does NOT claim: that the route set is worth a known amount
+# of score. End-to-end, with ranking ON -- the arm that ships -- adding the
+# category route is +0.003372 TS, 3 sessions gained and 2 lost, McNemar
+# p = 1.0000. NO VERDICT. The "+0.0127" quoted for this change in 66d127c is
+# the ranking-OFF arm (Run 2), which is not a configuration that ships, and it
+# should not have been banked (D-N1). Run ``python3 -m tools.phase7_ablation``
+# for both arms side by side.
+#
+# This is a retrieval constant, not a per-turn decision: selecting per mode was
+# measured worth +0.000298 and is not worth a knob.
 DEFAULT_ROUTES = ("bm25", "category")
 
 

@@ -14,7 +14,6 @@ from starter.ranking import rank as constraint_rank
 from starter.retrieval import (DEFAULT_ROUTES, POOL_LIMIT, bm25_route,
                                fuse, retrieve)
 from starter.state import update_state
-from starter.strategy import build_strategy
 from starter.text import flatten_text as _text
 from starter.text import terms as _terms
 
@@ -40,8 +39,13 @@ _RESPONSE_MESSAGE = "Here are the closest matches I found."
 # Phase 7 measured the 3-route union net-NEGATIVE (TS 0.131194 -> 0.115512)
 # and it was disabled. The Phase 9 review showed that conclusion was an
 # artifact of WHICH routes: the cost is the attribute route alone. With the
-# route set corrected to bm25 + category (see retrieval.DEFAULT_ROUTES) the
-# union is a clear win, so USE_MULTI_ROUTE is back ON.
+# route set corrected to bm25 + category the union is ON.
+#
+# It is ON because it measurably improves CANDIDATE RECALL, not because its
+# score effect is established -- end to end with ranking ON it is +0.0034 TS
+# at McNemar p = 1.0000, which is no verdict. See retrieval.DEFAULT_ROUTES for
+# the full statement of what is and is not established here; do not quote a
+# score gain for this flag without re-reading it.
 #
 # There is deliberately no USE_ADAPTIVE_STRATEGY flag. The strategy is always
 # computed but does not gate retrieval -- mode-adaptive route selection
@@ -269,13 +273,14 @@ class Agent:
             update_state(state, user_message, turn)
         context = _build_context(session_id, user_message, turn, state)
 
-        # Recomputed from scratch every turn, so it follows the state rather
-        # than latching (CP 9.3/9.4/9.5). It never sees a parent_asin and
-        # ranking never reads it (CP 9.6). It does NOT currently gate
-        # retrieval: mode-adaptive route selection measured worth +0.000298,
-        # so the route set is a retrieval constant (DEFAULT_ROUTES) instead.
-        # Kept because Phase 15 wants the mode for clarification pressure.
-        strategy = build_strategy(context)
+        # No build_strategy() call here on purpose. The strategy does not gate
+        # retrieval -- mode-adaptive route selection measured worth +0.000298,
+        # so the route set is a retrieval constant (DEFAULT_ROUTES) instead --
+        # and computing a value nothing reads is the same "mechanism that
+        # changes nothing" this phase deleted USE_ADAPTIVE_STRATEGY for
+        # (D-N4). starter.strategy stays: it is pure, tested, and measured by
+        # tools/phase9_mode_accuracy.py. Phase 15 wires it in HERE, when the
+        # clarification policy actually reads the mode.
 
         if USE_MULTI_ROUTE:
             pool = retrieve(self.connection, context, POOL_LIMIT, DEFAULT_ROUTES)

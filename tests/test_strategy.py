@@ -219,5 +219,75 @@ class EvaluatorBoilerplateMustNotDecideModeTest(unittest.TestCase):
         self.assertEqual(classify_mode(_ctx("just show me some options")), BROWSING)
 
 
+class ConcreteUnslottedDetailTest(unittest.TestCase):
+    """The CP 9.2 case the extraction vocabulary has no slot for.
+
+    The module docstring promises that free text naming something checkable --
+    "a buckle closure", "a stainless steel band" -- makes a turn buying. C
+    found the promise outliving its implementation: ``_has_concrete_evidence``
+    was deleted while fixing the ``options`` collision, and the docstring was
+    left claiming behaviour that no longer existed. These tests are the
+    docstring, executable.
+    """
+
+    def test_a_concrete_detail_with_no_slot_is_buying(self) -> None:
+        for message in ("It has a stainless steel band",
+                        "Buckle closure",
+                        "I'm looking for Watches. Stainless Steel Band"):
+            self.assertEqual(classify_mode(_ctx(message)), BUYING, message)
+
+    def test_the_real_override_openings_are_buying(self) -> None:
+        # Verbatim shape of the intent_override turn-1 message: the harness
+        # emits "I'm looking for {category}. {soft_preference}", and the
+        # preference is a raw catalog feature string.
+        self.assertEqual(
+            classify_mode(_ctx("I'm looking for Watches. Buckle closure")),
+            BUYING)
+
+    def test_a_concrete_detail_survives_a_silent_turn(self) -> None:
+        ctx = _ctx("I'm looking for Watches. Buckle closure")
+        ctx.user_message = ("Those options are not quite right yet. "
+                            "Ask me about one specific attribute.")
+        ctx.turn = 2
+        self.assertEqual(classify_mode(ctx), BUYING)
+
+    def test_soft_and_filler_text_alone_is_still_browsing(self) -> None:
+        # The gap the first version of this fallback had: generic filler read
+        # as volunteered detail.
+        for message in ("I'm looking for jackets, but I'm still exploring",
+                        "just something nice for the weekend",
+                        "I'd prefer something comfortable"):
+            self.assertEqual(classify_mode(_ctx(message)), BROWSING, message)
+
+    def test_a_plural_restating_the_category_is_not_evidence(self) -> None:
+        # update_state stores the CANONICAL "jacket" but leaves the surface
+        # "jackets" in the evidence residual. Naming a category is how both
+        # modes open, so that leftover must not decide the mode.
+        ctx = _ctx("I'm looking for jackets, but I'm still exploring")
+        self.assertEqual(ctx.state.slots["category"]["values"], ["jacket"])
+        self.assertIn("jackets", ctx.state.evidence[0]["normalized"])
+        self.assertEqual(classify_mode(ctx), BROWSING)
+
+    def test_the_soft_and_filler_vocabularies_are_live(self) -> None:
+        # D-N4: SOFT_CUES and FILLER_CUES fed only _VAGUE_TOKENS, whose only
+        # consumer had been deleted. If this fallback is ever removed again,
+        # remove them with it rather than leaving 81 dead words behind.
+        import inspect
+
+        from starter import strategy
+
+        source = inspect.getsource(strategy)
+        self.assertIn("_VAGUE_TOKENS", source.split("_VAGUE_TOKENS =")[1],
+                      "_VAGUE_TOKENS must have a consumer")
+
+    def test_an_override_withdraws_the_buying_signal_with_the_detail(self) -> None:
+        # CP 9.5: superseded evidence cannot keep a session buying.
+        ctx = _ctx("I'm looking for jackets. Buckle closure")
+        self.assertEqual(classify_mode(ctx), BUYING)
+        for entry in ctx.state.evidence:
+            entry["status"] = "superseded"
+        self.assertEqual(classify_mode(ctx), BROWSING)
+
+
 if __name__ == "__main__":
     unittest.main()
