@@ -11,7 +11,9 @@ the failure mode cannot relocate one module over again.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
+import starter
 from starter import agent, ranking, retrieval, state
 from tools import config_guard
 
@@ -48,6 +50,47 @@ class FlagDiscoveryIsPackageWideTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             config_guard.assert_all_flags_pinned(
                 set(config_guard.COMMITTED_FLAGS) | {("agent", "USE_GONE")})
+
+
+class ModuleListCompletenessTest(unittest.TestCase):
+    """D-P1: a hand-maintained module list is the same failure one level up.
+
+    Scoping the guard to ``starter.agent`` was the first version of this
+    failure; listing modules by hand was the second. The list is now checked
+    against the directory, so there is no third.
+    """
+
+    def test_the_list_matches_the_package_today(self) -> None:
+        config_guard.assert_module_list_is_complete()
+
+    def test_a_new_module_carrying_a_flag_is_not_silent(self) -> None:
+        # Verbatim the case D built on a copied tree: the semantic reranker the
+        # roadmap adds at Phase 13/14, carrying an unpinned flag.
+        new_module = Path(starter.__file__).resolve().parent / "reranker.py"
+        self.assertFalse(new_module.exists(), "pick a name that does not exist")
+        new_module.write_text("USE_SEMANTIC_RERANK = True\n", encoding="utf-8")
+        try:
+            with self.assertRaises(SystemExit) as caught:
+                config_guard.assert_module_list_is_complete()
+            self.assertIn("reranker", str(caught.exception))
+            # And it must also trip the flag guard, which calls it.
+            with self.assertRaises(SystemExit):
+                config_guard.assert_all_flags_pinned(
+                    set(config_guard.COMMITTED_FLAGS))
+        finally:
+            new_module.unlink()
+        # Clean again afterwards.
+        config_guard.assert_module_list_is_complete()
+
+    def test_a_listed_module_that_vanishes_also_trips(self) -> None:
+        original = config_guard.STARTER_MODULES
+        config_guard.STARTER_MODULES = original + ("no_such_module",)
+        try:
+            with self.assertRaises(SystemExit) as caught:
+                config_guard.assert_module_list_is_complete()
+            self.assertIn("no_such_module", str(caught.exception))
+        finally:
+            config_guard.STARTER_MODULES = original
 
 
 class CommittedConstantsTest(unittest.TestCase):

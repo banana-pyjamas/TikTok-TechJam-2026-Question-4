@@ -134,8 +134,21 @@ _ROUTE_PLAN: dict[str, tuple[list[str], dict[str, float]]] = {
 }
 
 
+def _slots(context: Context) -> dict:
+    """``state.slots``, or an empty mapping if it is not one.
+
+    The single-writer invariant means only ``state.update_state`` builds this,
+    and it always builds a dict -- so this is unreachable through the shipped
+    path. It is here because classification must degrade to "nothing known"
+    rather than raise: a mode is a workflow hint, and no hint is worth a
+    500 on a turn (principle E). Same reasoning as the ``normalized`` type
+    guard in ``_evidence_tokens``.
+    """
+    return context.state.slots if isinstance(context.state.slots, dict) else {}
+
+
 def _specific_slot_count(context: Context) -> int:
-    slots = context.state.slots
+    slots = _slots(context)
     return sum(
         1
         for name in SPECIFIC_SLOTS
@@ -189,7 +202,7 @@ def _restates_a_slot(token: str, slot_tokens: set[str]) -> bool:
 def _slot_tokens(context: Context) -> set[str]:
     """Every token of every value already captured in a slot."""
     out: set[str] = set()
-    for slot in context.state.slots.values():
+    for slot in _slots(context).values():
         if not isinstance(slot, dict):
             continue
         for value in slot.get("values", ()) or ():

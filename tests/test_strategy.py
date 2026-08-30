@@ -219,6 +219,32 @@ class EvaluatorBoilerplateMustNotDecideModeTest(unittest.TestCase):
         self.assertEqual(classify_mode(_ctx("just show me some options")), BROWSING)
 
 
+class MalformedStateDegradesRatherThanRaisesTest(unittest.TestCase):
+    """Unreachable through the shipped path, closed anyway.
+
+    Only ``state.update_state`` writes ``slots``, and it always writes a dict.
+    But a mode is a workflow hint, and no hint is worth a raised exception on a
+    live turn (principle E) -- classification must degrade to "nothing known".
+    D carried this one open across three rounds.
+    """
+
+    def test_non_dict_slots_classify_browsing(self) -> None:
+        for broken in (None, [], "slots", 7):
+            state = SessionState(session_id="m")
+            state.slots = broken
+            context = Context(session_id="m", turn=1,
+                              user_message="a leather jacket", state=state)
+            self.assertEqual(classify_mode(context), BROWSING, repr(broken))
+
+    def test_build_strategy_survives_it_too(self) -> None:
+        state = SessionState(session_id="m")
+        state.slots = None
+        strategy = build_strategy(
+            Context(session_id="m", turn=1, user_message="black", state=state))
+        self.assertEqual(strategy.mode, BROWSING)
+        self.assertEqual(strategy.params["specific_slots"], 0)
+
+
 class ConcreteUnslottedDetailTest(unittest.TestCase):
     """The CP 9.2 case the extraction vocabulary has no slot for.
 

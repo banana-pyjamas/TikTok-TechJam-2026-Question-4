@@ -62,10 +62,16 @@ POOL_LIMIT = 300
 #   bm25 + category            0.4150    0.5650    0.8100   +8, 9/1, p = 0.0215
 #   bm25 + cat + attribute     0.4000    0.5450    0.7950   +5, 8/3, p = 0.2266
 #
-# The category route is established at every K. The attribute route is not
-# established on recall at any K, and costs 0.019 TS -- it re-ranks on terms
-# the BM25 route already covers, and its unique candidates arrive too far down
-# to help. So it is excluded.
+# Read that as ONE comparison observed at three thresholds, not three
+# independent results (D-P3). The three K are nested views of the same paired
+# data, so counting them as three findings would overstate it: at a Bonferroni
+# alpha/6 none clear, at alpha/2 only @100 and @300 do. What actually carries
+# the conclusion is that the category route gains at every threshold and loses
+# at none -- +7/+7/+8 with 1, 0 and 1 sessions moving the other way.
+#
+# The attribute route gains at no threshold, and costs 0.019 TS -- it re-ranks
+# on terms the BM25 route already covers, and its unique candidates arrive too
+# far down to help. So it is excluded.
 #
 # What this comment does NOT claim: that the route set is worth a known amount
 # of score. End-to-end, with ranking ON -- the arm that ships -- adding the

@@ -287,6 +287,10 @@ def main() -> None:
             after = {r["session_id"]: r["best_rank"][label] is not None
                      and r["best_rank"][label] < k for r in records}
             print("   " + format_test(f"@{k}: {label} vs bm25", mcnemar(before, after)))
+    print("   One comparison at three thresholds, not three findings: the K "
+          "are nested\n   views of the same paired data. What carries the "
+          "conclusion is the consistent\n   direction across all three, not "
+          "any single p-value (D-P3).")
 
     # -- 2. by scenario --------------------------------------------------
     print("\n2. recall by scenario, committed route set")
@@ -324,6 +328,25 @@ def main() -> None:
     for stage in ("in final pool", "lost at fusion cap", "never retrieved by any route"):
         print(f"   {stage:32}{stages[stage]:>5}{stages[stage] / total:>9.4f}")
     assert sum(stages.values()) == total, "every session must be accounted for"
+
+    # The stage the loss table stops one short of. Retrieval getting the target
+    # into the pool is necessary, not sufficient -- and the gap between those
+    # two is far larger than anything the route set moves (D-P2). Printed here
+    # so the funnel is one artifact rather than two numbers joined by hand.
+    reached_top_10 = sum(1 for session in result["sessions"] if session["hit"])
+    in_pool_never_ranked = stages["in final pool"] - reached_top_10
+    print("\n4b. and then what happens to them (the conversion funnel)")
+    for stage, count in (("in the final pool", stages["in final pool"]),
+                         ("reach the top 10", reached_top_10),
+                         ("in the pool, never ranked into top 10",
+                          in_pool_never_ranked)):
+        print(f"   {stage:38}{count:>5}{count / total:>9.4f}")
+    print(f"   Retrieval delivers the target for "
+          f"{stages['in final pool'] / total:.0%} of sessions; ranking surfaces "
+          f"{reached_top_10 / total:.0%}.\n"
+          f"   The entire route-set question moves 8 sessions into a pool that "
+          f"fails to\n   convert {in_pool_never_ranked}. The remaining headroom "
+          "is not in retrieval.")
 
     # -- 5. pool distribution ---------------------------------------------
     print("\n5. candidate pool size per turn, committed route set")

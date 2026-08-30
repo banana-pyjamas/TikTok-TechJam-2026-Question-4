@@ -60,6 +60,13 @@ def verdict(test: dict, alpha: float = 0.05) -> str:
     Deliberately blunt. "no verdict" is not a soft "probably real": on this
     set it means the comparison does not establish the difference in EITHER
     direction, and the number must not be banked as a gain.
+
+    Per-comparison, with no multiplicity adjustment. When a caller prints a
+    family of related tests -- the same paired data at several thresholds, say
+    -- several "established" labels are ONE finding seen from several angles,
+    not several findings, and the caller must say so (D-P3). What survives
+    multiplicity is a consistent direction across the family; a single label
+    that clears alpha in isolation does not.
     """
     if test["discordant"] == 0:
         return "identical (no session changed verdict)"

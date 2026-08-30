@@ -13,14 +13,24 @@ pool -- was not pinned at all. Changing it swings the measured score by up to
 0.019 while the ablation's Run-0 baseline check still passes. That is the
 exact failure mode the guard was added to prevent, one module over.
 
-Two things are guarded:
+Three things are guarded:
 
+the module list       ``STARTER_MODULES`` is checked against the package
+                      directory. A hand-maintained list is the same failure
+                      mode one level up: a new ``starter/reranker.py`` with a
+                      ``USE_SEMANTIC_RERANK`` flag would be silent, because
+                      nothing would look in it (D-P1). The roadmap adds a
+                      semantic reranker at Phase 13/14, so this is a live risk,
+                      not a hypothetical one.
 ``USE_`` flags        discovered across the WHOLE ``starter`` package. Every
                       one must appear in the caller's pinned set; an
                       unregistered flag raises.
 committed constants   values that are not flags but still determine what is
                       measured. Checked against ``COMMITTED_CONSTANTS`` before
-                      any run, and restored afterwards.
+                      any run. This module never MUTATES a constant, so there
+                      is nothing for it to restore -- a tool that changes one
+                      (``tools/phase9_retrieval_evidence.py`` swaps the route
+                      table) restores it itself (D-P4).
 
 Usage::
 
@@ -35,10 +45,15 @@ Usage::
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 from typing import Any, Iterable
 
+import starter
+
 # Every module of the shipped package. Listed rather than auto-walked so that
-# adding a module is a deliberate act that shows up in review.
+# adding a module is a deliberate act that shows up in review -- but the list
+# is CHECKED against the directory (``assert_module_list_is_complete``), so
+# "deliberate" cannot degrade into "forgotten".
 STARTER_MODULES = (
     "agent",
     "catalog_meta",
@@ -76,8 +91,41 @@ def _module(name: str):
     return importlib.import_module(f"starter.{name}")
 
 
+def assert_module_list_is_complete() -> None:
+    """Raise if ``STARTER_MODULES`` has drifted from the package directory.
+
+    This is the guard on the guard. Scoping it to ``starter.agent`` was the
+    first version of this failure (D-N2); a hand-maintained module list is the
+    second (D-P1). Reading the directory removes the third, because a module
+    that exists but is unlisted can no longer hide a flag.
+    """
+    package = Path(starter.__file__).resolve().parent
+    on_disk = {
+        path.stem for path in package.glob("*.py")
+        if path.stem != "__init__"
+    }
+    listed = set(STARTER_MODULES)
+    problems = []
+    if on_disk - listed:
+        problems.append(
+            "not listed in STARTER_MODULES, so any USE_ flag in them is "
+            "invisible to this guard: " + ", ".join(sorted(on_disk - listed))
+        )
+    if listed - on_disk:
+        problems.append(
+            "listed but no longer on disk: " + ", ".join(sorted(listed - on_disk))
+        )
+    if problems:
+        raise SystemExit("config_guard: " + "; ".join(problems))
+
+
 def discover_flags() -> set[tuple[str, str]]:
-    """Every module-level ``USE_`` flag in the whole ``starter`` package."""
+    """Every module-level ``USE_`` flag in the whole ``starter`` package.
+
+    Checks the module list first, so a flag cannot hide in a module nobody
+    remembered to add.
+    """
+    assert_module_list_is_complete()
     found: set[tuple[str, str]] = set()
     for module_name in STARTER_MODULES:
         module = _module(module_name)
@@ -135,7 +183,11 @@ def set_flag(module_name: str, name: str, value: Any) -> None:
 
 
 def restore_committed_flags() -> None:
-    """Put every flag back to its committed value."""
+    """Put every FLAG back to its committed value.
+
+    Flags only. Constants are never mutated by this module, so there is
+    nothing here to restore; a tool that swaps one restores it itself.
+    """
     for (module_name, name), value in COMMITTED_FLAGS.items():
         set_flag(module_name, name, value)
 
