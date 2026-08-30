@@ -195,9 +195,14 @@ class Agent:
         meta_batch: list[tuple] = []
 
         def flush() -> None:
+            if not batch:
+                return
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+            # Placeholders derived from the row so adding a signal column to
+            # catalog_meta cannot silently desync this INSERT.
+            placeholders = ", ".join("?" * len(meta_batch[0]))
             cursor.executemany(
-                f"INSERT OR REPLACE INTO {META_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT OR REPLACE INTO {META_TABLE} VALUES ({placeholders})",
                 meta_batch,
             )
             batch.clear()

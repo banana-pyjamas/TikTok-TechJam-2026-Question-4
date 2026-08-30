@@ -19,6 +19,7 @@ import re
 import sqlite3
 from typing import Any
 
+from starter.profile import ALL_TRAIT_TERMS
 from starter.state import _COLOR_ALIASES, _COLORS, _MATERIALS
 
 _TOKEN = re.compile(r"[a-z0-9.]+")
@@ -34,13 +35,13 @@ def create_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {TABLE} ("
         "parent_asin TEXT PRIMARY KEY, colors TEXT, materials TEXT, "
-        "cats TEXT, store TEXT, sizes TEXT, price REAL)"
+        "cats TEXT, store TEXT, sizes TEXT, price REAL, traits TEXT)"
     )
 
 
-def signals(product: dict) -> tuple[str, str, str, str, str, float | None]:
+def signals(product: dict) -> tuple[str, str, str, str, str, float | None, str]:
     """The row this product contributes: colours, materials, category tokens,
-    store, sizes, price."""
+    store, sizes, price, profile-trait vocabulary."""
     categories = " ".join(str(value) for value in (product.get("categories") or [])).lower()
     store = str(product.get("store") or "").lower()
     text = " ".join([
@@ -68,6 +69,7 @@ def signals(product: dict) -> tuple[str, str, str, str, str, float | None]:
         store,
         " ".join(sizes),
         price,
+        " ".join(sorted(tokens & ALL_TRAIT_TERMS)),
     )
 
 
@@ -83,7 +85,7 @@ def lookup(
         return {}
     placeholders = ",".join("?" * len(parent_asins))
     rows = connection.execute(
-        f"SELECT parent_asin, colors, materials, cats, store, sizes, price "
+        f"SELECT parent_asin, colors, materials, cats, store, sizes, price, traits "
         f"FROM {TABLE} WHERE parent_asin IN ({placeholders})",
         parent_asins,
     ).fetchall()
@@ -95,6 +97,7 @@ def lookup(
             "store": row[4] or "",
             "sizes": set(row[5].split()) if row[5] else set(),
             "price": row[6],
+            "traits": set(row[7].split()) if row[7] else set(),
         }
         for row in rows
     }

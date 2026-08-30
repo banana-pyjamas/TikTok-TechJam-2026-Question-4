@@ -27,6 +27,7 @@ FROZEN_DIAGNOSTIC_KEYS = {
     "base_score",
     "attribute_score",
     "violation_penalty",
+    "profile_score",
     "final_score",
     "rank",
     "matched",
@@ -36,7 +37,7 @@ FROZEN_DIAGNOSTIC_KEYS = {
 
 _EMPTY_META = {
     "color": set(), "material": set(), "cats": set(),
-    "store": "", "sizes": set(), "price": None,
+    "store": "", "sizes": set(), "price": None, "traits": set(),
 }
 
 
@@ -185,35 +186,59 @@ class CP64UnknownIsNotViolation(unittest.TestCase):
         self.assertEqual(detail["violation_penalty"], 0.0)
         self.assertGreater(detail["attribute_score"], 0.0)
 
-    def test_unknown_denominator_convention_is_flag_controlled(self) -> None:
+    def test_denominator_is_the_active_constraint_count(self) -> None:
         """The reported gap: the previous assertion (attribute_score > 0)
-        held under BOTH conventions, so it could not tell them apart. Pin
-        each arm to an exact value instead."""
-        one_slot = _context(color=["black"])
-        two_slots = _context(color=["black"], material=["denim"])
+        held under either denominator convention, so it could not tell them
+        apart. Pin the exact value instead."""
         metadata = {"HALF": _meta(color={"black"})}  # material is UNKNOWN
 
         def attribute_score(ctx) -> float:
             result = rank([_candidate("HALF", 0.01)], ctx, metadata, 10)
             return result.diagnostics["HALF"]["attribute_score"]
 
-        baseline = attribute_score(one_slot)
-        self.assertAlmostEqual(baseline, ranking.W_MATCH)
+        self.assertAlmostEqual(
+            attribute_score(_context(color=["black"])), ranking.W_MATCH)
+        self.assertAlmostEqual(
+            attribute_score(_context(color=["black"], material=["denim"])),
+            ranking.W_MATCH / 2)
 
-        original = ranking.EXCLUDE_UNKNOWN_FROM_RATIO
-        try:
-            ranking.EXCLUDE_UNKNOWN_FROM_RATIO = False
-            self.assertAlmostEqual(attribute_score(two_slots), ranking.W_MATCH / 2,
-                                   msg="flag off: UNKNOWN dilutes the ratio")
-            ranking.EXCLUDE_UNKNOWN_FROM_RATIO = True
-            self.assertAlmostEqual(attribute_score(two_slots), baseline,
-                                   msg="flag on: UNKNOWN changes nothing")
-        finally:
-            ranking.EXCLUDE_UNKNOWN_FROM_RATIO = original
+    def test_unknown_rescales_but_never_reorders(self) -> None:
+        """Because the denominator is the active constraint count, it is
+        identical for every candidate in a turn -- so an UNKNOWN slot cannot
+        change who outranks whom. This is what makes CP 6.4 hold."""
+        metadata = {
+            "TWO": _meta(color={"black"}, material={"denim"}),
+            "ONE": _meta(color={"black"}),
+            "ZERO": _meta(),
+        }
+        candidates = [_candidate(a, 0.01) for a in ("ZERO", "ONE", "TWO")]
+        expected = ["TWO", "ONE", "ZERO"]
+        for ctx in (
+            _context(color=["black"], material=["denim"]),
+            # A third, wholly unknown slot rescales every score; order holds.
+            _context(color=["black"], material=["denim"], brand=["nike"]),
+        ):
+            result = rank(candidates, ctx, metadata, 10)
+            self.assertEqual([c.parent_asin for c in result.ranked], expected)
 
-    def test_flag_default_preserves_measured_behaviour(self) -> None:
-        # A disabled feature must not silently change behaviour.
-        self.assertFalse(ranking.EXCLUDE_UNKNOWN_FROM_RATIO)
+    def test_thin_metadata_does_not_outrank_stronger_evidence(self) -> None:
+        """Why per-candidate "known verdicts only" was rejected: it would let
+        a product the catalog barely describes beat one that demonstrably
+        matches more constraints."""
+        ctx = _context(color=["black"], material=["denim"], category=["jacket"])
+        metadata = {
+            # demonstrates two matches; catalog describes it fully
+            "RICH": _meta(color={"black"}, material={"denim"}, cats={"socks"}),
+            # demonstrates one match; catalog says nothing else about it
+            "SPARSE": _meta(color={"black"}),
+        }
+        result = rank([_candidate("RICH", 0.02), _candidate("SPARSE", 0.02)],
+                      ctx, metadata, 10)
+        self.assertGreater(
+            result.diagnostics["RICH"]["attribute_score"],
+            result.diagnostics["SPARSE"]["attribute_score"],
+            "more demonstrated matches must earn a higher attribute score",
+        )
 
     def test_size_mismatch_is_never_a_violation(self) -> None:
         # Size metadata is too sparse to treat a miss as evidence against.
@@ -239,10 +264,10 @@ class MultiWordCategoryTest(unittest.TestCase):
     def _cats(*names: str) -> dict:
         from starter.catalog_meta import signals
 
-        _, _, cats, _, _, _ = signals({
+        cats = signals({
             "parent_asin": "X", "title": "", "categories": list(names),
             "features": [], "details": {}, "store": "", "description": [],
-        })
+        })[2]
         return _meta(cats=set(cats.split()))
 
     def test_shared_first_word_is_not_a_match(self) -> None:
@@ -368,7 +393,8 @@ class CP67RankingDiagnostics(unittest.TestCase):
         for entry in self._result().diagnostics.values():
             self.assertAlmostEqual(
                 entry["final_score"],
-                entry["base_score"] + entry["attribute_score"] - entry["violation_penalty"],
+                entry["base_score"] + entry["attribute_score"]
+                - entry["violation_penalty"] + entry["profile_score"],
             )
 
     def test_rank_is_one_based_and_contiguous(self) -> None:

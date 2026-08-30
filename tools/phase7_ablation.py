@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 
 from starter import agent as agent_module
-from starter import ranking
 from starter.agent import Agent
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 
@@ -119,14 +118,10 @@ def main() -> None:
           f"(HR {run0['hit_rate_at_10']} vs {reference['hit_rate_at_10']}, "
           f"MRR {run0['mrr']} vs {reference['mrr']})")
 
-    # The one flag Phase 6 left undecided, measured on the full pipeline.
-    print("\nEXCLUDE_UNKNOWN_FROM_RATIO arms (Run 3 config):")
-    for flag in (False, True):
-        ranking.EXCLUDE_UNKNOWN_FROM_RATIO = flag
-        result = evaluate(agent, samples, catalog_ids, categories, products)
-        print(f"  {str(flag):>6}  HR={result['hit_rate_at_10']:.4f}  "
-              f"MRR={result['mrr']:.6f}  TS={result['recommended_technical_score']:.6f}")
-    ranking.EXCLUDE_UNKNOWN_FROM_RATIO = False
+    print("\ncommitted config: "
+          f"USE_STATE={agent_module.USE_STATE}, "
+          f"USE_MULTI_ROUTE={agent_module.USE_MULTI_ROUTE}, "
+          f"USE_CONSTRAINT_RANKING={agent_module.USE_CONSTRAINT_RANKING}")
 
 
 if __name__ == "__main__":
