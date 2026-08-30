@@ -34,6 +34,7 @@ from starter.vocabulary import (GROUNDING, VOCABULARY_LIMIT, build_vocabulary,
                                 ground, most_discriminative)
 from tools import config_guard
 from tools.capture import CapturingAgent
+from tools.summaries import percentiles
 
 CATALOG = "data/catalog.jsonl"
 DATASET = "data/public_set.jsonl"
@@ -45,14 +46,6 @@ EXAMPLES = (
     ("I'm looking for running shoes, something lightweight", "lightweight"),
     ("I'm looking for a rain coat, waterproof", "waterproof"),
 )
-
-
-def _percentiles(values: list[int]) -> tuple[float, int, int]:
-    ordered = sorted(values)
-    mean = sum(ordered) / len(ordered)
-    median = ordered[len(ordered) // 2]
-    p90 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.9))]
-    return mean, median, p90
 
 
 def _evidence_tokens(state) -> list[str]:
@@ -87,7 +80,8 @@ def main() -> None:
     print(f"score during capture: HR {result['hit_rate_at_10']:.4f} "
           f"MRR {result['mrr']:.6f} TS "
           f"{result['recommended_technical_score']:.6f}")
-    if abs(result["recommended_technical_score"] - 0.134566) > 1e-9:
+    if abs(result["recommended_technical_score"]
+           - config_guard.COMMITTED_TECHNICAL_SCORE) > 1e-9:
         raise SystemExit(
             "the vocabulary layer changed the score. It is not wired into "
             "agent.respond, so this should be impossible -- investigate "
@@ -167,13 +161,13 @@ def main() -> None:
           f"{1000 * query_seconds / turns:.2f} ms/turn)\n")
 
     # -- CP 10.1 ----------------------------------------------------------
-    mean, median, p90 = _percentiles(sizes)
-    pool_mean, pool_median, pool_p90 = _percentiles(pool_sizes)
+    shape = percentiles(sizes)
+    pool_shape = percentiles(pool_sizes)
     print("CP 10.1  vocabulary size per turn")
-    print(f"   terms      mean {mean:>7.1f}   median {median:>5}   "
-          f"P90 {p90:>5}   max {max(sizes):>5}   cap {VOCABULARY_LIMIT}")
-    print(f"   pool       mean {pool_mean:>7.1f}   median {pool_median:>5}   "
-          f"P90 {pool_p90:>5}   max {max(pool_sizes):>5}")
+    print(f"   terms      mean {shape.mean:>7.1f}   median {shape.median:>5.0f}   "
+          f"P90 {shape.p90:>5.0f}   max {shape.maximum:>5.0f}   cap {VOCABULARY_LIMIT}")
+    print(f"   pool       mean {pool_shape.mean:>7.1f}   median {pool_shape.median:>5.0f}   "
+          f"P90 {pool_shape.p90:>5.0f}   max {pool_shape.maximum:>5.0f}")
 
     # -- CP 10.2 ----------------------------------------------------------
     print("\nCP 10.2  degenerate pools encountered on the real dialogue")

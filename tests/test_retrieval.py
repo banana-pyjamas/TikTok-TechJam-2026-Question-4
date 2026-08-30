@@ -17,6 +17,7 @@ from starter.retrieval import (
     attribute_route,
     bm25_route,
     category_route,
+    fuse,
     retrieve,
 )
 from starter.state import update_state
@@ -240,6 +241,49 @@ class UnionBudgetTest(unittest.TestCase):
         pool = [c.parent_asin for c in retrieve(self._agent.connection, self._ctx(), 20)]
         self.assertEqual(len(pool), len(set(pool)))
         self.assertLessEqual(len(pool), 20)
+
+
+class TestFuseOverUnregisteredRoutes(unittest.TestCase):
+    """``fuse`` must fuse every route it is GIVEN, not only the known ones.
+
+    It used to iterate ``_ROUTE_ORDER`` alone, so an experimental route passed
+    in by a measurement tool was silently discarded: the pool came back looking
+    correct and simply missing that route's candidates. A measured "the union
+    adds nothing" would then have been a measurement of a union that never
+    happened (Phase 13, review B5).
+    """
+
+    def test_an_unknown_route_contributes_candidates(self) -> None:
+        pool = fuse({"bm25": [("B0KNOWN", 1.0)], "tfidf": [("B0NEW", 0.9)]}, 10)
+        self.assertEqual({c.parent_asin for c in pool}, {"B0KNOWN", "B0NEW"})
+
+    def test_provenance_names_the_unknown_route(self) -> None:
+        pool = fuse({"bm25": [("B0BOTH", 1.0)], "tfidf": [("B0BOTH", 0.9)]}, 10)
+        self.assertEqual(len(pool), 1)
+        self.assertEqual(set(pool[0].route_sources), {"bm25", "tfidf"})
+        self.assertEqual(pool[0].route_scores["tfidf"], 0.9)
+
+    def test_a_multi_route_candidate_outranks_a_single_route_one(self) -> None:
+        pool = fuse({"bm25": [("B0ONE", 1.0), ("B0BOTH", 0.5)],
+                     "tfidf": [("B0BOTH", 0.9)]}, 10)
+        self.assertEqual([c.parent_asin for c in pool], ["B0BOTH", "B0ONE"])
+
+    def test_committed_route_set_ordering_is_unchanged(self) -> None:
+        per_route = {"bm25": [("A", 1.0), ("B", 0.5)],
+                     "category": [("B", 0.7), ("C", 0.2)]}
+        self.assertEqual([c.parent_asin for c in fuse(per_route, 10)],
+                         ["B", "A", "C"])
+
+    def test_unknown_routes_sort_after_known_ones_deterministically(self) -> None:
+        # Priority only breaks ties, so it is exercised on candidates whose
+        # fused score and best rank are identical.
+        forward = fuse({"zebra": [("Z", 1.0)], "bm25": [("A", 1.0)],
+                        "alpha": [("M", 1.0)]}, 10)
+        backward = fuse({"alpha": [("M", 1.0)], "zebra": [("Z", 1.0)],
+                         "bm25": [("A", 1.0)]}, 10)
+        self.assertEqual([c.parent_asin for c in forward], ["A", "M", "Z"])
+        self.assertEqual([c.parent_asin for c in forward],
+                         [c.parent_asin for c in backward])
 
 
 _OVERRIDE_ROWS = [

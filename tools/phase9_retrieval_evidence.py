@@ -46,6 +46,7 @@ from starter.retrieval import DEFAULT_ROUTES, POOL_LIMIT, fuse
 from tools import config_guard
 from tools.capture import CapturingAgent
 from tools.significance import format_test, mcnemar
+from tools.summaries import percentiles
 
 CATALOG = "data/catalog.jsonl"
 DATASET = "data/public_set.jsonl"
@@ -98,14 +99,6 @@ def _restore_routes() -> None:
 
 _ORIGINAL_RUN = retrieval._run
 _ORIGINAL_ROUTES = dict(retrieval.ROUTES)
-
-
-def _percentiles(values: list[int]) -> tuple[float, int, int]:
-    ordered = sorted(values)
-    mean = sum(ordered) / len(ordered)
-    median = ordered[len(ordered) // 2]
-    p90 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.9))]
-    return mean, median, p90
 
 
 def _recall(records: list[dict], config: str, k: int) -> float:
@@ -317,9 +310,9 @@ def main() -> None:
     # -- 5. pool distribution ---------------------------------------------
     print("\n5. candidate pool size per turn, committed route set")
     for label, values in (("pre-cap unique", precap_sizes), ("final pool", final_sizes)):
-        mean, median, p90 = _percentiles(values)
-        print(f"   {label:18}mean {mean:>8.1f}   median {median:>5}   "
-              f"P90 {p90:>5}   max {max(values):>5}")
+        shape = percentiles(values)
+        print(f"   {label:18}mean {shape.mean:>8.1f}   median {shape.median:>5.0f}   "
+              f"P90 {shape.p90:>5.0f}   max {shape.maximum:>5.0f}")
     capped = sum(1 for size in precap_sizes if size > POOL_LIMIT)
     print(f"   the {POOL_LIMIT}-candidate cap binds on {capped}/{len(precap_sizes)} "
           f"turns ({capped / len(precap_sizes):.1%})")

@@ -86,56 +86,126 @@ POOL_LIMIT = 300
 DEFAULT_ROUTES = ("bm25", "category")
 
 # --------------------------------------------------------------------------
-# Phase 13 (dense retrieval) -- NOT IMPLEMENTED, on measured grounds.
+# Phase 13 (dense retrieval) -- NOT IMPLEMENTED. There are two reasons and
+# they are NOT equally strong: one is measured, one is a packaging constraint.
+# Keeping them apart is the whole point of this comment, because the first
+# version of it merged them and overstated both.
 #
-# The roadmap gates the phase on evidence: "Only do this if measurements
-# justify it." They do not. `python3 -m tools.phase13_dense_gate` reproduces
-# all of the following.
+# `python3 -m tools.phase13_dense_gate` reproduces every number below.
 #
-# 1. THE CEILING IS SMALL. 162 of 200 targets already reach the pool; 38 never
-#    do, and those 38 are the entire surface a retrieval route can attack. At
-#    the measured 25.9% in-pool conversion, recovering EVERY one of them is
-#    worth ~9.9 hits -- about +0.05 HR, +0.025 TS. Meanwhile 120 targets sit
-#    IN the pool and still lose. The conversion failure is 3.2x the size of
-#    the entire retrieval ceiling.
+# 1  WHAT WAS MEASURED: A LEXICAL VECTOR ROUTE, AND IT MAKES THE POOL WORSE
 #
-# 2. IT IS NOT THE FAILURE DENSE RETRIEVAL FIXES. Dense retrieval bridges
-#    vocabulary mismatch -- the shopper says "warm", the catalog says
-#    "insulated". Of the 38 missed targets, the number sharing NO vocabulary
-#    with what the shopper said is ZERO. All 38 already share tokens; 6 share
-#    five or more. There is no gap to bridge. These are discrimination
-#    failures among thousands of products that match the query equally well.
+# The strongest vector-space retriever that can actually be built under the
+# submission constraints is lexical: TF-IDF cosine over the same catalog text
+# BM25 scores, with BM25's own column weights. Built and run rather than
+# argued from theory -- this repo has been burned once for predicting a
+# mechanism's behaviour instead of measuring it (the Phase 11 "cannot
+# reorder" claim). Session-level candidate recall over the live dialogue, all
+# four arms fused through the RRF below with route provenance intact:
 #
-# 3. THE MISSES ARE INFORMATION-STARVED, NOT SEMANTICS-STARVED. 23 of the 38
-#    are browsing sessions, which open with a bare category and never add
-#    anything, because the agent never asks a question. Median shopper input
-#    across the misses is 5 tokens and 0.95 filled slots. No encoder recovers
-#    one product from 50,000 given "Basketball Men" and nothing else. This is
-#    the same conclusion the Phase 9 retrieval evidence reached from the other
-#    direction, and it points at Phase 15, not here.
+#                                   @50      @100      @300   vs committed @300
+#   bm25                         0.3800    0.5300    0.7700   +1 / -9
+#   bm25 + category (committed)  0.4150    0.5650    0.8100   --
+#   tfidf                        0.2600    0.4150    0.6950   +4 / -27
+#   bm25 + category + tfidf      0.3600    0.5100    0.8050   +1 / -2
 #
-# 4. THE BEST SHIPPABLE ALTERNATIVE MEASURES WORSE. Run, not assumed: TF-IDF
-#    cosine over the same indexed terms gets recall@300 of 66.0% against the
-#    committed set's 81.0%. It does recover 7 of the 38 -- worth ~0.005 TS
-#    through a union -- while finding 30 fewer targets overall.
+# Standalone recall was never the question -- a weaker retriever can still
+# contribute unique candidates through a union. The UNION is the question,
+# and it is worse rather than neutral: -11 sessions at @50 (2/13 discordant,
+# p = 0.0074) and -11 at @100 (1/12, p = 0.0034), no verdict at @300 (1/2).
+# The lexical route adds 111 unique candidates per turn and pushes cap loss
+# from 146 to 257 discarded candidates per turn; what it displaces is worth
+# more than what it adds. OFF on measurement, not on principle.
 #
-# And no trained encoder can ship here: none is installed, the starter is
-# standard-library only, and submission_rules notes the organizer "may disable
-# network access" for final scoring, so a model would have to be vendored and
-# validated in a sandbox we cannot see. A random-projection embedding of the
-# same bag of words is not a substitute -- it approximates the inner products
-# measured in (4) rather than adding to them.
+# 2  WHAT WAS NOT MEASURED: A TRAINED SEMANTIC ENCODER
 #
-# CP 13.2 ("dense OFF preserves previous behaviour") therefore holds trivially
-# and permanently. No USE_DENSE flag is added: a flag whose ON position has no
-# implementation is a knob that changes nothing, which this repo has deleted
-# twice already.
+# TF-IDF is a LEXICAL vector space. Two products with disjoint wording are
+# orthogonal in it however related they are, which is the one thing a trained
+# encoder does differently. It is therefore not a proxy for a dense retriever
+# and NOT an upper bound on one, and nothing in this repo measures what a
+# dense encoder would be worth here.
 #
-# WHAT WOULD REOPEN THIS: a vendored encoder that runs offline. The same
-# encoder question gates Phase 14, and the numbers above say Phase 14 is the
-# better place to spend it -- reranking the 120 in-pool losses has 3.2x the
-# headroom of retrieving the 38 that never arrive.
+# It is absent for FEASIBILITY reasons, stated precisely because the previous
+# version of this comment said the flat and false "none is installed":
+# nothing is vendored in this repository; docs/submission_rules.md notes the
+# organizer "may disable network access" for final scoring, so nothing can be
+# fetched at scoring time; the submission is certified on the bare system
+# python3.9, which current torch builds do not support; and this package is
+# standard-library only by design. Those are packaging facts. Another machine
+# having torch changes none of them -- and none of them is evidence that
+# semantic retrieval would not help.
+#
+# 3  THE SIZE OF THE PRIZE, BRACKETED BY MEASUREMENT
+#
+# 162 of 200 targets reach the pool; 38 never do. In retrieval's own metric
+# that is exactly +0.19 candidate recall, and it is the only figure here that
+# is not an inference. Downstream it depends on WHERE a route puts the
+# target, measured by re-running the evaluator with the answer injected into
+# those 38 sessions and no others:
+#
+#   injected at the pool FLOOR (fusion_score 0)   TS +0.0000    0/38 convert
+#   injected at the pool HEAD  (best fusion)      TS +0.1848   38/38 convert
+#
+# So retrieval's downstream value is somewhere in [+0.0000, +0.1848] TS, and
+# RANK matters more than presence: getting the target into the pool at the
+# bottom is worth literally nothing through the current ranker. The "+0.025
+# TS ceiling" quoted for this phase in 7c52e87 is neither bound -- it was an
+# extrapolation, and it moved the HitRate term only, while TS = 0.5*HR +
+# 0.3*MRR + 0.2*eff and a recovered hit moves all three. Applied consistently
+# the same extrapolation is +0.0428. It is withdrawn in favour of the bracket.
+#
+# Meanwhile 120 targets sit IN the pool and still lose: 3.2x the session count
+# of the whole retrieval surface, all of it downstream of this file.
+#
+# 4  RETRACTION: THE VOCABULARY ARGUMENT MEASURED THE SIMULATOR
+#
+# 7c52e87 claimed "of the 38 missed targets, the number sharing NO vocabulary
+# with what the shopper said is ZERO", and read that as "there is nothing for
+# dense retrieval to bridge". WITHDRAWN. evaluator/local_evaluator.py:154
+# builds the shopper's opening out of coarse_category(target.categories), so
+# counting the target's categories field among its terms makes overlap >= 1
+# an identity: 200/200 openings contain that generated string and 35 of the
+# 38 misses have their entire overlap inside it. The sessions retrieval FINDS
+# show the same distribution, so the metric separates nothing. With the
+# copied taxonomy field removed, 5 of 38 misses share no vocabulary (13.2%,
+# against 8.6% of found sessions); title only, 14 of 38 (36.8% vs 31.5%).
+#
+# What survives is narrow: pure vocabulary-mismatch cases are rare in this
+# set. That is not the claim "semantic retrieval has no value", and this
+# comment does not make it.
+#
+# 5  WHAT IS AND IS NOT DELIVERED
+#
+# CP 13.2 ("dense OFF preserves previous behaviour") holds trivially. CP 13.1
+# / 13.3 / 13.4 / 13.5 are not implemented. No USE_DENSE flag is added: a flag
+# whose ON position has no implementation is a knob that changes nothing,
+# which this repo has deleted twice already.
+#
+# WHAT WOULD REOPEN THIS: a vendored encoder that runs offline on the
+# certified interpreter. The bracket in (3) says what to measure about it
+# FIRST -- the rank it assigns the target, not the recall it achieves, since
+# recall alone bought +0.0000. The same encoder question gates Phase 14, and
+# reranking the 120 in-pool losses works on 3.2x the sessions.
 # --------------------------------------------------------------------------
+
+
+def _fusion_priority(names: Iterable[str]) -> list[str]:
+    """Deterministic fusion order over whatever routes were actually run.
+
+    ``_ROUTE_ORDER`` first, in its declared order, then any other route name
+    alphabetically. The tail matters: ``fuse`` used to iterate ``_ROUTE_ORDER``
+    alone, so a per-route dict carrying a route not in that tuple had its
+    results SILENTLY DISCARDED -- the pool came back looking correct and simply
+    missing a route's candidates. A measurement tool fusing an experimental
+    route (``tools/phase13_dense_gate.py``) would have measured a union that
+    never happened.
+
+    Behaviour for the committed route set is unchanged: with ``bm25`` and
+    ``category`` present and nothing else, this returns exactly what iterating
+    ``_ROUTE_ORDER`` returned.
+    """
+    known = [name for name in _ROUTE_ORDER if name in names]
+    return known + sorted(set(names) - set(_ROUTE_ORDER))
 
 
 def _fts_or(tokens: list[str]) -> str:
@@ -258,14 +328,18 @@ def fuse(
     Deterministic: ties break on best per-route rank, then route priority,
     then ``parent_asin``. Deduplicated by construction (fusion is keyed by
     ``parent_asin``). Each ``Candidate`` keeps its RAW per-route scores.
+
+    Every route in ``per_route`` is fused, not only the ones named in
+    ``_ROUTE_ORDER`` -- see ``_fusion_priority`` for why that distinction was
+    load-bearing.
     """
     fused: dict[str, float] = defaultdict(float)
     route_scores: dict[str, dict[str, float]] = defaultdict(dict)
     best_rank: dict[str, int] = {}
     best_route: dict[str, int] = {}
 
-    for priority, name in enumerate(_ROUTE_ORDER):
-        for rank, (parent_asin, score) in enumerate(per_route.get(name, [])):
+    for priority, name in enumerate(_fusion_priority(per_route)):
+        for rank, (parent_asin, score) in enumerate(per_route[name]):
             fused[parent_asin] += 1.0 / (_RRF_K + rank + 1)
             route_scores[parent_asin][name] = score
             best_rank[parent_asin] = min(best_rank.get(parent_asin, rank), rank)

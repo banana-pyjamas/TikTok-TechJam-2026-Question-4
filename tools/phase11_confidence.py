@@ -93,12 +93,13 @@ def main() -> None:
     config_guard.restore_committed_flags()
 
     off, on = results[False], results[True]
-    if abs(off["recommended_technical_score"] - 0.134566) > 1e-9:
+    committed = config_guard.COMMITTED_TECHNICAL_SCORE
+    if abs(off["recommended_technical_score"] - committed) > 1e-9:
         raise SystemExit(
             "OFF no longer reproduces the committed score. The flag's OFF "
             "position must be exact; fix that before reading anything else.")
-    print("\n   OFF reproduces the committed 0.134566 exactly, so the flag's "
-          "OFF position\n   is a true no-op and the comparison below is "
+    print(f"\n   OFF reproduces the committed {committed} exactly, so the "
+          "flag's OFF position\n   is a true no-op and the comparison below is "
           "controlled.")
     print("   " + format_test("weighting ON vs OFF",
                               mcnemar(hits_by_sample(off), hits_by_sample(on))))

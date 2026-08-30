@@ -118,6 +118,24 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
 }
 
 
+# The public-set TechnicalScore the committed configuration produces. Not a
+# constant OF the starter package -- an outcome of it -- but it belongs in this
+# registry all the same, because several tools open by asserting "my capture
+# reproduced the shipped run" and they need one place to check against.
+#
+# It is here because three tools each pinned their own copy of 0.134566 and two
+# of them went stale the moment Phase 12 moved the score to 0.182258:
+# ``phase10_vocabulary`` and ``phase11_confidence`` have been exiting with
+# "the vocabulary layer changed the score" / "OFF no longer reproduces the
+# committed score" ever since -- a guard failing for the one reason a guard
+# must never fail, its own staleness. (``phase12_popularity`` still pins
+# 0.134566 on purpose: that is the score of its USE_POPULARITY=False arm, a
+# historical reference rather than the committed one.)
+#
+# Moving the committed score means updating this line in the same change.
+COMMITTED_TECHNICAL_SCORE = 0.182258
+
+
 def _module(name: str):
     return importlib.import_module(f"starter.{name}")
 
