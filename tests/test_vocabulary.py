@@ -16,9 +16,10 @@ from starter.catalog_meta import TABLE, create_table, signals
 from starter.contracts import Candidate
 from starter.vocabulary import (BOILERPLATE, GROUNDING, INDEX_TERM_LIMIT,
                                 MAX_DOCUMENT_RATIO, NOISE_FLOOR_POOL,
-                                VOCABULARY_LIMIT, build_vocabulary, ground,
-                                ground_all, most_discriminative, pool_terms,
-                                product_terms)
+                                MIN_MAPPED_SUPPORT, VOCABULARY_LIMIT,
+                                build_vocabulary, ground, ground_all,
+                                grounding_support, most_discriminative,
+                                pool_terms, product_terms)
 
 _CATALOG = Path("data/catalog.jsonl")
 
@@ -136,9 +137,20 @@ class CP102EmptyPoolSafetyTest(unittest.TestCase):
         self.assertEqual(ground("warm", empty), ())
         self.assertEqual(most_discriminative(empty, 5), ())
         self.assertEqual(ground_all(["warm", "soft"], empty), {})
+        self.assertEqual(grounding_support("warm", empty), {})
         # And on a dict that is not a vocabulary at all.
         self.assertEqual(ground("warm", {}), ())
         self.assertEqual(most_discriminative({}, 5), ())
+
+    def test_none_is_as_safe_as_empty(self) -> None:
+        # D-V3: Phase 15 reads this out of Context.derived, where a missing
+        # key is None -- so None is a reachable input, not a hostile one.
+        connection = _connection([_product("A", title="Jacket")])
+        self.assertEqual(build_vocabulary(connection, None)["terms"], {})  # type: ignore[arg-type]
+        self.assertEqual(ground("warm", None), ())  # type: ignore[arg-type]
+        self.assertEqual(most_discriminative(None, 5), ())  # type: ignore[arg-type]
+        self.assertEqual(grounding_support("warm", None), {})  # type: ignore[arg-type]
+        self.assertEqual(ground_all(["warm"], None), {})  # type: ignore[arg-type]
 
     def test_pool_terms_with_no_asins_issues_no_query(self) -> None:
         connection = _connection([_product("A", title="Jacket")])
@@ -291,6 +303,68 @@ class CP104GroundingTest(unittest.TestCase):
             watches, _pool(*[f"W{n}" for n in range(12)]))
         self.assertEqual(ground("warm", watch_vocabulary), ())
         self.assertNotEqual(ground("warm", self._jacket_pool()), ())
+
+    def test_an_incidental_mention_does_not_ground(self) -> None:
+        """D-V1: presence alone was enough, so one padded watch strap in 300
+        candidates satisfied "warm". A mapped word must describe a real share
+        of the pool."""
+        # 2 of 60 = 3.3%: above MIN_DOCUMENT_FREQUENCY, so "padded" IS in the
+        # vocabulary and the support floor is what rejects it. (At 1 of 40 the
+        # rare-term filter would reject it first and this would pass for the
+        # wrong reason.)
+        products = [_product(f"W{n}", title="Quartz Watch") for n in range(60)]
+        for index in range(2):
+            products[index]["features"] = ["padded strap"]
+        connection = _connection(products)
+        vocabulary = build_vocabulary(
+            connection, _pool(*[p["parent_asin"] for p in products]))
+        self.assertIn("padded", vocabulary["terms"])
+        self.assertLess(vocabulary["terms"]["padded"] / 60, MIN_MAPPED_SUPPORT)
+        self.assertEqual(ground("warm", vocabulary), ())
+
+    def test_the_floor_is_on_inference_not_on_the_shoppers_own_word(self) -> None:
+        # "padded" said by the shopper is not an inference about meaning, so a
+        # rare match still surfaces; "padded" inferred from "warm" does not.
+        products = [_product(f"W{n}", title="Quartz Watch") for n in range(60)]
+        for index in range(2):
+            products[index]["features"] = ["padded strap"]
+        connection = _connection(products)
+        vocabulary = build_vocabulary(
+            connection, _pool(*[p["parent_asin"] for p in products]))
+        self.assertEqual(ground("padded", vocabulary), ("padded",))
+        self.assertEqual(ground("warm", vocabulary), ())
+
+    def test_grounding_is_materiality_not_word_sense(self) -> None:
+        """The limit, pinned as a fact rather than left as an aspiration.
+
+        "resistant" means scratch-resistant on sunglasses and water-resistant
+        on a jacket. It is the same string, so a materiality floor cannot
+        separate them and no caller may assume it does.
+        """
+        # 12 of 20, so "resistant" clears the support floor without hitting
+        # the ubiquity ceiling -- the shape the real sunglasses pool has.
+        products = [_product(f"S{n}", title="Sunglasses") for n in range(20)]
+        for index in range(12):
+            products[index]["features"] = ["scratch resistant impact lenses"]
+        connection = _connection(products)
+        vocabulary = build_vocabulary(
+            connection, _pool(*[p["parent_asin"] for p in products]))
+        self.assertIn("resistant", ground("waterproof", vocabulary),
+                      "this is the documented limit; if it ever stops being "
+                      "true, the docstring in ground() must change with it")
+
+    def test_support_is_exposed_unfiltered_for_stricter_consumers(self) -> None:
+        products = [_product(f"W{n}", title="Quartz Watch") for n in range(60)]
+        for index in range(2):
+            products[index]["features"] = ["padded strap"]
+        connection = _connection(products)
+        vocabulary = build_vocabulary(
+            connection, _pool(*[p["parent_asin"] for p in products]))
+        # ground() filters it out; grounding_support still reports it, which is
+        # how a caller learns the grounding would have been thin.
+        self.assertEqual(ground("comfy", vocabulary), ())
+        self.assertAlmostEqual(
+            grounding_support("comfy", vocabulary).get("padded", 0.0), 2 / 60)
 
     def test_a_word_the_pool_uses_grounds_to_itself(self) -> None:
         self.assertIn("fleece", ground("fleece", self._jacket_pool()))

@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 import starter
-from starter import agent, ranking, retrieval, state
+from starter import agent, ranking, retrieval, state, vocabulary
 from tools import config_guard
 
 
@@ -104,6 +104,50 @@ class CommittedConstantsTest(unittest.TestCase):
                       config_guard.COMMITTED_CONSTANTS)
         self.assertEqual(config_guard.COMMITTED_CONSTANTS[("retrieval", "DEFAULT_ROUTES")],
                          retrieval.DEFAULT_ROUTES)
+
+    def test_every_numeric_tunable_is_pinned(self) -> None:
+        # D-V2: Phase 10 shipped six thresholds unpinned, two of them values a
+        # measurement had just rejected. The registry is now derived, not
+        # maintained.
+        config_guard.assert_all_constants_pinned()
+
+    def test_discovery_attributes_a_reexport_to_its_definer(self) -> None:
+        # agent.py imports POOL_LIMIT from retrieval; it must be demanded once,
+        # against the module that defines it.
+        found = config_guard.discover_numeric_constants()
+        self.assertIn(("retrieval", "POOL_LIMIT"), found)
+        self.assertNotIn(("agent", "POOL_LIMIT"), found)
+
+    def test_an_unregistered_numeric_constant_trips_the_guard(self) -> None:
+        key = ("vocabulary", "VOCABULARY_LIMIT")
+        original = config_guard.COMMITTED_CONSTANTS.pop(key)
+        try:
+            with self.assertRaises(SystemExit) as caught:
+                config_guard.assert_committed_constants()
+            self.assertIn("VOCABULARY_LIMIT", str(caught.exception))
+        finally:
+            config_guard.COMMITTED_CONSTANTS[key] = original
+
+    def test_the_rejected_phase_10_values_cannot_come_back_silently(self) -> None:
+        # The two values measurement overturned, by name.
+        for name, rejected in (("MAX_DOCUMENT_RATIO", 0.5),
+                               ("VOCABULARY_LIMIT", 400)):
+            with self.subTest(name=name):
+                original = getattr(vocabulary, name)
+                setattr(vocabulary, name, rejected)
+                try:
+                    with self.assertRaises(SystemExit) as caught:
+                        config_guard.assert_committed_constants()
+                    self.assertIn(name, str(caught.exception))
+                finally:
+                    setattr(vocabulary, name, original)
+
+    def test_string_vocabularies_are_not_demanded(self) -> None:
+        # Content, not configuration: pinning them would mean re-approving the
+        # registry on every word added.
+        found = config_guard.discover_numeric_constants()
+        for name in ("GROUNDING", "BOILERPLATE"):
+            self.assertNotIn(("vocabulary", name), found)
 
     def test_moving_a_constant_trips_the_guard(self) -> None:
         original = retrieval.DEFAULT_ROUTES

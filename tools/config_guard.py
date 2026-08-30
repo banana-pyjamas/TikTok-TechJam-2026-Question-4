@@ -44,6 +44,7 @@ Usage::
 
 from __future__ import annotations
 
+import ast
 import importlib
 from pathlib import Path
 from typing import Any, Iterable
@@ -85,6 +86,20 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
     ("retrieval", "POOL_LIMIT"): 300,
     ("ranking", "W_MATCH"): 0.10,
     ("ranking", "W_PENALTY"): 0.02,
+    # Not flagged by any reviewer -- found by the completeness check below,
+    # which is the point of having one.
+    ("ranking", "W_PROFILE"): 0.008,
+    # Phase 10. Registered with the phase, not after it (D-V2): the first two
+    # of these are values a measurement REJECTED -- a 0.5 ratio made
+    # most_discriminative degenerate and a 400 cap silently discarded 31% of
+    # the vocabulary -- so leaving them unpinned meant the tree could return
+    # to them with every check still passing.
+    ("vocabulary", "MAX_DOCUMENT_RATIO"): 0.8,
+    ("vocabulary", "VOCABULARY_LIMIT"): 1500,
+    ("vocabulary", "MIN_MAPPED_SUPPORT"): 0.05,
+    ("vocabulary", "MIN_DOCUMENT_FREQUENCY"): 2,
+    ("vocabulary", "NOISE_FLOOR_POOL"): 8,
+    ("vocabulary", "INDEX_TERM_LIMIT"): 40,
 }
 
 
@@ -159,12 +174,73 @@ def assert_all_flags_pinned(pinned: Iterable[tuple[str, str]]) -> None:
         )
 
 
+def discover_numeric_constants() -> set[tuple[str, str]]:
+    """Every module-level numeric tunable defined in the ``starter`` package.
+
+    Read from the SOURCE rather than the imported module, so a re-export
+    (``agent`` imports ``POOL_LIMIT`` from ``retrieval``) is attributed to the
+    module that actually defines it and is not demanded twice.
+
+    Numeric on purpose. A float or int assigned at module level is a knob --
+    a threshold, a weight, a limit -- and is the class of thing that changes
+    measured numbers when it moves. The string vocabularies (``SOFT_CUES``,
+    ``GROUNDING``, ``BOILERPLATE``) are content, not configuration; pinning
+    them here would mean re-approving the registry on every word added, which
+    is how a guard becomes noise and then gets ignored.
+
+    Only literal assignments are found. A computed constant would be missed;
+    none exist today, and one would be worth a comment saying why.
+    """
+    found: set[tuple[str, str]] = set()
+    for module_name in STARTER_MODULES:
+        source = Path(_module(module_name).__file__).read_text(encoding="utf-8")
+        for node in ast.parse(source).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            value = node.value
+            if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+                value = value.operand
+            if not (isinstance(value, ast.Constant)
+                    and isinstance(value.value, (int, float))
+                    and not isinstance(value.value, bool)):
+                continue
+            for target in node.targets:
+                if (isinstance(target, ast.Name)
+                        and target.id.isupper()
+                        and not target.id.startswith("_")):
+                    found.add((module_name, target.id))
+    return found
+
+
+def assert_all_constants_pinned() -> None:
+    """Raise if a numeric tunable exists that ``COMMITTED_CONSTANTS`` omits.
+
+    D-V2: Phase 10 shipped six new thresholds and none were registered --
+    including the two a measurement had just REJECTED, so the tree could have
+    returned to a 0.5 document ratio and a 400-term cap with every check still
+    green. That is the fourth appearance of one shape (agent-only scan, then
+    the module list, then the module list's completeness, now the constant
+    registry's), so it is fixed the same way: by deriving the expectation
+    instead of maintaining it.
+    """
+    unpinned = sorted(discover_numeric_constants() - set(COMMITTED_CONSTANTS))
+    if unpinned:
+        raise SystemExit(
+            "config_guard: these numeric constants are not pinned by "
+            "COMMITTED_CONSTANTS: "
+            + ", ".join(f"{module}.{name}" for module, name in unpinned)
+            + ". Add each with its committed value, so that moving it later "
+            "fails loudly instead of silently changing every measured number."
+        )
+
+
 def assert_committed_constants() -> None:
     """Raise if a non-flag constant has drifted from its committed value.
 
     Prevents the reported numbers from silently describing a different
     configuration than the one the comments in ``starter/`` justify.
     """
+    assert_all_constants_pinned()
     drifted = []
     for (module_name, name), expected in sorted(COMMITTED_CONSTANTS.items()):
         actual = getattr(_module(module_name), name)

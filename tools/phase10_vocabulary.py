@@ -26,8 +26,9 @@ import time
 from collections import Counter
 
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
-from starter.contracts import Context
+from starter.contracts import Context, SessionState
 from starter.retrieval import DEFAULT_ROUTES, POOL_LIMIT, retrieve
+from starter.state import update_state
 from starter.text import terms as tokenize
 from starter.vocabulary import (GROUNDING, VOCABULARY_LIMIT, build_vocabulary,
                                 ground, most_discriminative)
@@ -224,9 +225,6 @@ def main() -> None:
 
     # -- worked examples --------------------------------------------------
     print("\nworked examples (fresh session, real retrieval, real pool)")
-    from starter.contracts import SessionState
-    from starter.state import update_state
-
     for message, word in EXAMPLES:
         state = SessionState(session_id="ex")
         update_state(state, message, 1)
@@ -238,6 +236,43 @@ def main() -> None:
         print(f"   {'':12}    pool {vocabulary['pool_size']}, "
               f"{len(vocabulary['terms'])} terms; would ask about: "
               f"{', '.join(most_discriminative(vocabulary, 6))}")
+
+    # D-V1, kept runnable. The claim "a proposal wrong for this pool costs
+    # nothing" was false, and the way it stayed false was that nothing
+    # re-checked it. This grid re-checks it every run.
+    print("\nD-V1 grid: mapped grounding on pools the word does not belong to")
+    hostile = {
+        "watches": "I'm looking for Watches Wrist Watches",
+        "sunglasses": "I'm looking for Sunglasses",
+        "earrings": "I'm looking for Jewelry Earrings",
+        "handbags": "I'm looking for Handbags Shoulder Bags",
+    }
+    non_empty = 0
+    cells = 0
+    survivors: list[str] = []
+    for name, message in hostile.items():
+        state = SessionState(session_id="h")
+        update_state(state, message, 1)
+        context = Context(session_id="h", turn=1, user_message=message,
+                          state=state)
+        pool = retrieve(agent.connection, context, POOL_LIMIT, DEFAULT_ROUTES)
+        vocabulary = build_vocabulary(agent.connection, pool)
+        for key in sorted(GROUNDING):
+            cells += 1
+            mapped = [word for word in ground(key, vocabulary) if word != key]
+            if mapped:
+                non_empty += 1
+                survivors.append(f"[{name}] {key} -> {', '.join(mapped)}")
+    print(f"   {non_empty}/{cells} cells still ground "
+          f"(was 59/{cells} before the support floor)")
+    for line in survivors[:8]:
+        print(f"     {line}")
+    print("   Survivors are NOT all errors -- water-resistant watches and "
+          "light sunglasses\n   are real senses. The ones that are errors are "
+          "polysemy ('resistant' means\n   scratch-resistant here), which a "
+          "frequency floor cannot fix and which\n   ground()'s docstring "
+          "states outright. Phase 15 must treat a grounded word\n   as a "
+          "phrasing to consider, not as a shared sense.")
 
     print(f"\ncost: index build {index_seconds:.1f}s "
           f"(+~1.8s for the vocab column), ~11.5 MB of side table, "

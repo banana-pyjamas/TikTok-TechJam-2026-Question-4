@@ -12,18 +12,24 @@ Four checkpoints:
                           stored by ``catalog_meta``); a turn's vocabulary is
                           the document frequency of those terms WITHIN the
                           candidate pool (``build_vocabulary``).
-  CP 10.2  empty pool     every function here is total. An empty pool, a pool
-                          of products with no indexed terms, and a pool whose
-                          rows are missing from the side table all yield an
-                          empty vocabulary rather than an exception, and
-                          grounding against an empty vocabulary returns
-                          nothing rather than falling back to un-grounded
-                          guesses.
+  CP 10.2  empty pool     every function here is total, on ``None`` as well as
+                          on empty. An empty pool, a pool of products with no
+                          indexed terms, a pool whose rows are missing from
+                          the side table, and a ``None`` where a pool or a
+                          vocabulary was expected all yield an empty result
+                          rather than an exception, and grounding against an
+                          empty vocabulary returns nothing rather than falling
+                          back to un-grounded guesses. ``None`` matters
+                          because the consumer reads this out of
+                          ``Context.derived``, where a missing key is
+                          ``None`` (D-V3).
   CP 10.3  noise control  in-pool frequency bounds, applied only when the pool
                           is big enough for a frequency to mean anything.
   CP 10.4  grounding      a free-form word ("warm") maps to the catalog words
-                          that are actually present in this pool
-                          ("insulated", "thermal", "fleece", "lined").
+                          this pool MATERIALLY uses ("insulated", "thermal",
+                          "fleece", "lined"). This is a materiality test, not
+                          word-sense disambiguation -- see ``ground`` for the
+                          counterexample that survives it.
 
 WHY IN-POOL FREQUENCY, NOT GLOBAL IDF
 
@@ -81,6 +87,18 @@ MIN_DOCUMENT_FREQUENCY = 2
 # both -- so the ceiling only removes what describes the pool, and
 # ``most_discriminative`` does the splitting.
 MAX_DOCUMENT_RATIO = 0.8
+
+# A mapped word must describe at least this share of the pool before grounding
+# will propose it. See ``ground`` for what this does and does not buy.
+#
+# 5% of a 300-candidate pool is 15 products: enough that the word names a real
+# option among these candidates rather than one seller's phrasing. Measured
+# against the hostile grid in D's Phase 10 review (21 map keys x 4 non-clothing
+# pools), the floor cuts non-empty results from 59/84 to 19/84 while keeping
+# 6 of 6 of the senses this phase claims. Those 6 survive unchanged from a 0%
+# floor to a 10% one and break only at 15%, so 5% sits mid-plateau rather than
+# on a cliff -- the standard W_MATCH was set by.
+MIN_MAPPED_SUPPORT = 0.05
 
 # The cap exists to bound memory, not to choose -- so it is set above what a
 # real turn produces. Measured on the live dialogue, a 300-candidate pool
@@ -235,7 +253,7 @@ def build_vocabulary(
     wiring an unread vocabulary in would repeat that. It costs one indexed
     query per turn when a consumer arrives.
     """
-    pool = [c.parent_asin for c in candidates if isinstance(c, Candidate)]
+    pool = [c.parent_asin for c in (candidates or ()) if isinstance(c, Candidate)]
     unique = list(dict.fromkeys(asin for asin in pool if asin))
     dropped = {"rare": 0, "ubiquitous": 0, "over_limit": 0}
     if not unique:
@@ -285,6 +303,7 @@ def most_discriminative(
 
     Total on an empty vocabulary (CP 10.2).
     """
+    vocabulary = vocabulary if isinstance(vocabulary, dict) else {}
     pool_size = vocabulary.get("pool_size") or 0
     entries = vocabulary.get("terms") or {}
     if not pool_size or not entries or count <= 0:
@@ -296,36 +315,96 @@ def most_discriminative(
     return tuple(term for term, _ in ordered[:count])
 
 
-def ground(term: str, vocabulary: dict[str, Any]) -> tuple[str, ...]:
+def ground(
+    term: str,
+    vocabulary: dict[str, Any],
+    min_support: float = MIN_MAPPED_SUPPORT,
+) -> tuple[str, ...]:
     """CP 10.4 -- a free-form word to the pool's own words for it.
 
-    Two sources, in order: the word itself when the candidates use it, then
-    the mapped catalog words that the candidates use. Anything the pool does
-    not contain is dropped, so the result is always something a candidate
-    actually says. An unmapped word that the pool does not use grounds to
-    nothing -- deliberately, because a guess here would send the layers above
-    chasing a word no candidate contains.
+    Two sources: the word itself when the candidates use it, then the mapped
+    catalog words the candidates use MATERIALLY -- in at least ``min_support``
+    of the pool. An unmapped word the pool does not use grounds to nothing,
+    deliberately, because a guess would send the layers above chasing a word
+    no candidate contains.
+
+    WHAT THIS GUARANTEES, AND WHAT IT DOES NOT
+
+    Guaranteed: every word returned is one these candidates actually use, and
+    a mapped word describes a real share of them rather than one listing.
+
+    NOT guaranteed: that the pool means what the shopper meant. This is a
+    materiality test, not word-sense disambiguation. The counterexample is
+    concrete and survives the floor -- on a pool of sunglasses::
+
+        ground("waterproof", sunglasses)  ->  ("resistant",)
+
+    because sunglasses are scratch- and impact-resistant, and "resistant" is
+    the same string either way. An earlier version of this docstring claimed
+    "the same word on a watches pool grounds to nothing... a proposal wrong
+    for this pool costs nothing". That was false: it was verified against a
+    synthetic pool, and on the real one ``ground("warm", watches)`` returned
+    ("padded", "down") from padded straps (D-V1). The floor removes that case
+    and most like it, but polysemy is not solvable at this layer without a
+    model, and no caller should be written as though it were.
+
+    So a consumer -- Phase 15 -- must treat a grounded word as a CANDIDATE
+    phrasing to consider, never as evidence that the pool shares the
+    shopper's sense. ``grounding_support`` exposes the numbers for a consumer
+    that wants a stricter bar than the default.
 
     Matching is exact. No stemming: three ``_stem`` helpers already exist in
     this codebase and a fourth that disagreed with them would be worse than
     none. Plurals are handled where they matter by listing both forms in
     ``GROUNDING``.
     """
+    vocabulary = vocabulary if isinstance(vocabulary, dict) else {}
     entries = vocabulary.get("terms") or {}
     if not isinstance(term, str) or not entries:
         return ()
     token = term.strip().lower()
     if not token:
         return ()
+    pool_size = vocabulary.get("pool_size") or 0
+    # The shopper's own word is not an inference about meaning, so the
+    # materiality floor -- which exists to suppress incidental inferences --
+    # does not apply to it. A rare word the shopper actually said is still
+    # worth surfacing; a rare word we guessed is not.
     found = [token] if token in entries else []
-    found += [
-        word for word in GROUNDING.get(token, ())
-        if word in entries and word != token
-    ]
+    for word in GROUNDING.get(token, ()):
+        if word == token or word not in entries:
+            continue
+        if pool_size and entries[word] / pool_size < min_support:
+            continue
+        found.append(word)
     # Present-in-most-candidates first: of several words the pool uses for one
     # idea, the commonest is the pool's own way of saying it.
     return tuple(sorted(dict.fromkeys(found),
                         key=lambda word: (-entries[word], word)))
+
+
+def grounding_support(
+    term: str, vocabulary: dict[str, Any]
+) -> dict[str, float]:
+    """Share of the pool using each word ``term`` could ground to.
+
+    Unfiltered, so a consumer can apply its own bar rather than inheriting
+    this module's. Includes words below ``MIN_MAPPED_SUPPORT`` -- seeing that
+    a mapped word sits at 1% is how a caller learns the grounding is thin.
+    """
+    vocabulary = vocabulary if isinstance(vocabulary, dict) else {}
+    entries = vocabulary.get("terms") or {}
+    pool_size = vocabulary.get("pool_size") or 0
+    if not isinstance(term, str) or not entries or not pool_size:
+        return {}
+    token = term.strip().lower()
+    if not token:
+        return {}
+    words = ([token] if token in entries else []) + [
+        word for word in GROUNDING.get(token, ())
+        if word in entries and word != token
+    ]
+    return {word: entries[word] / pool_size for word in dict.fromkeys(words)}
 
 
 def ground_all(
