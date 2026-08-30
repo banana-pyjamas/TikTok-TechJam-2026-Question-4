@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from starter.contracts import Candidate, Context, RankingResult, SessionState
+from starter.retrieval import POOL_LIMIT, retrieve
 from starter.state import update_state
 from starter.text import flatten_text as _text
 from starter.text import terms as _terms
@@ -204,18 +205,20 @@ class Agent:
     ) -> dict:
         """One turn end to end.
 
-        The deterministic state manager updates ``SessionState`` first (the
-        single writer, Phase 2); then Context -> BM25 -> Candidate[] ->
-        RankingResult -> payload. Retrieval and ranking do not touch state.
-        Phase 2 stores constraints but does not yet feed them into the
-        query, so the recommendations are still the BM25 baseline.
+        State manager (single writer) -> Context -> multi-route retrieval
+        UNION (Phase 5) -> ranking -> payload. Retrieval and ranking do not
+        touch state.
+
+        Phase 5 builds a multi-route candidate pool (BM25 + category +
+        attribute); ``_rank`` still orders by BM25 only, so the top-10
+        response is unchanged from the baseline. Constraint-aware ranking
+        that makes the pool count is Phase 6.
         """
         if session_id not in self._states:
             raise RuntimeError("reset must be called before respond")
         state = self._states[session_id]
         update_state(state, user_message, turn)
         context = _build_context(session_id, user_message, turn, state)
-        rows = _bm25_search(self.connection, context.user_message, top_k)
-        candidates = _to_candidates(rows)
-        result = _rank(candidates, top_k)
+        pool = retrieve(self.connection, context, POOL_LIMIT)
+        result = _rank(pool, top_k)
         return _to_response(result, top_k)
