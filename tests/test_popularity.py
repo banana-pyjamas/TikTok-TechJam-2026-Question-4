@@ -313,3 +313,45 @@ class FlagOffIsExactTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Phase11InteractionTest(unittest.TestCase):
+    """D Phase 12 review, P4 — CP 12.4's arithmetic bound is CONDITIONAL.
+
+    With USE_CONFIDENCE_WEIGHTING OFF, a satisfied constraint contributes
+    W_MATCH / n and the prior is bounded by W_POPULARITY, so the inequality
+    holds for any n. With it ON, the attribute term is additionally scaled by
+    EC * MR, which has no lower bound near 1 -- and the inequality can invert.
+
+    USE_CONFIDENCE_WEIGHTING ships False, so this is latent. It is pinned here
+    so that turning that flag on cannot happen without this failing and
+    forcing W_POPULARITY to be re-derived.
+    """
+
+    def test_the_bound_holds_while_phase_11_weighting_is_off(self) -> None:
+        self.assertFalse(ranking.USE_CONFIDENCE_WEIGHTING,
+                         "if this flag ships True, re-derive W_POPULARITY")
+        # Weakest possible match under OFF: one of n constraints matched.
+        for n in (1, 2, 3, 6):
+            weakest_match = W_MATCH / n
+            strongest_prior = W_POPULARITY  # decay <= 1
+            self.assertGreater(weakest_match, strongest_prior, f"n={n}")
+
+    def test_the_bound_inverts_if_phase_11_weighting_is_turned_on(self) -> None:
+        # Two hedged constraints on poorly-attested slots.
+        weight = 0.4 * 0.1          # EC_HEDGED * MIN_RELIABILITY
+        matched_term = W_MATCH * weight / 2
+        prior_term = W_POPULARITY * evidence_decay(0.4 + 0.4)
+        self.assertLess(matched_term, prior_term,
+                        "this asserts the KNOWN defect: if it starts passing "
+                        "the interaction was fixed and the docstring in "
+                        "starter/popularity.py must be updated")
+
+    def test_the_interaction_is_documented_where_the_flag_lives(self) -> None:
+        import inspect
+
+        from starter import popularity as popularity_module
+
+        self.assertIn("USE_CONFIDENCE_WEIGHTING",
+                      inspect.getdoc(popularity_module) or "",
+                      "the conditional must be stated beside the bound")

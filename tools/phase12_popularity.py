@@ -149,12 +149,16 @@ def main() -> None:
 
     # -- 5. CP 12.4, measured on the live dialogue -------------------------
     print("\n5. CP 12.4 ON THE LIVE DIALOGUE: does a bestseller ever beat a match?")
+    print("   Scope is the FULL ranked pool, not the Top-10. An earlier version")
+    print("   passed top_k=10 to rank(), so the check never looked past rank 10")
+    print("   and the reported figure was far narrower than it sounded")
+    print("   (C Phase 12 review). Full-pool is a strictly stronger check.")
     agent.order.clear()
     agent.captured.clear()
     evaluate(agent, samples, catalog_ids, categories, products)
     inversions = 0
     checked = 0
-    turns_with_constraints = 0
+    eligible = 0
     for session_id, captures in agent.by_session().items():
         for capture in captures:
             context = Context(session_id=session_id, turn=capture["turn"],
@@ -164,22 +168,30 @@ def main() -> None:
             constraints, bounds = active_constraints(context)
             if not constraints:
                 continue
-            turns_with_constraints += 1
             pool = retrieve(agent.connection, context, POOL_LIMIT, DEFAULT_ROUTES)
             if not pool:
                 continue
             metadata = meta_lookup(agent.connection,
                                    [c.parent_asin for c in pool])
-            ranked = rank(pool, context, metadata, 10).ranked
+            # len(pool), not 10: rank truncates to top_k before returning.
+            ranked = rank(pool, context, metadata, len(pool)).ranked
             # A "match" satisfies at least one constraint; a "non-match"
-            # satisfies none. CP 12.4 fails if a non-match outranks a match
-            # purely on popularity.
+            # satisfies none.
             verdicts = {}
             for candidate in ranked:
                 meta = metadata.get(candidate.parent_asin, {})
                 verdicts[candidate.parent_asin] = any(
                     classify(slot, values, meta, bounds) == ranking.MATCH
                     for slot, values in constraints.items())
+            checked += 1
+            # A turn can only EXHIBIT an inversion if it contains both a match
+            # and a non-match. Counting turns that could never have shown one
+            # inflates the denominator and makes the evidence look far thicker
+            # than it is (D Phase 12 review).
+            values = list(verdicts.values())
+            if not (any(values) and not all(values)):
+                continue
+            eligible += 1
             order = [c.parent_asin for c in ranked]
             for index, asin in enumerate(order):
                 if verdicts[asin]:
@@ -187,16 +199,19 @@ def main() -> None:
                 if any(verdicts[later] for later in order[index + 1:]):
                     inversions += 1
                     break
-            checked += 1
-    print(f"   turns checked (with >=1 active constraint): {checked}")
+    print(f"   turns with >=1 active constraint and a non-empty pool: {checked}")
+    print(f"   of those, turns that COULD show an inversion (mixed pool): "
+          f"{eligible}")
     print(f"   turns where a NON-matching candidate outranks a matching one: "
-          f"{inversions} ({inversions / max(checked, 1):.1%})")
-    print("   Some inversions are expected and correct -- retrieval score and")
-    print("   the violation penalty both legitimately outrank a weak match.")
-    print("   What CP 12.4 forbids is POPULARITY causing them, which the")
-    print("   arithmetic rules out: the whole prior is bounded by "
-          f"{W_POPULARITY}, and one")
-    print(f"   satisfied constraint is worth up to {W_MATCH}.")
+          f"{inversions} ({inversions / max(eligible, 1):.1%} of eligible)")
+    print("   Read the eligible row as the denominator. The checked row counts")
+    print("   turns whose pool was all-match or all-non-match, where no")
+    print("   inversion was possible and a zero means nothing.")
+    print("   And read the result as what it is: an observed absence on this")
+    print("   dataset, not a structural proof. The component bound "
+          f"(W_POPULARITY {W_POPULARITY}")
+    print(f"   << W_MATCH {W_MATCH}) constrains two terms; base_score varies")
+    print("   independently and is no part of it. See starter/popularity.py.")
 
     print(f"\nconfig: {config_guard.describe()}")
 

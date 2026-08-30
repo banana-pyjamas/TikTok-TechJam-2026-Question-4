@@ -175,14 +175,31 @@ def main() -> None:
     print("  * = the arm that ships. n=200 sessions; one session is ~0.005 HR "
           "/ ~0.01 TS.")
 
+    # Every field the reference publishes, not just two. All five have always
+    # matched, but a guard that checks HR and MRR alone would not notice MTTC,
+    # efficiency or TS breaking (D Phase 12 review).
     reference = json.loads(Path("docs/baseline_results.json").read_text())
     run0 = results[0]
-    ok = (abs(run0["hit_rate_at_10"] - reference["hit_rate_at_10"]) < 1e-9
-          and abs(run0["mrr"] - reference["mrr"]) < 1e-6)
+    # (our field, the reference's name for it, tolerance)
+    checks = [
+        ("sample_count", "sample_count", 0),
+        ("hit_rate_at_10", "hit_rate_at_10", 1e-9),
+        ("mrr", "mrr", 1e-6),
+        ("mttc", "mttc", 1e-6),
+        ("efficiency", "efficiency", 1e-6),
+        ("recommended_technical_score", "technical_score", 1e-6),
+    ]
+    failures = [
+        f"{ours} {run0.get(ours)} vs {reference[theirs]}"
+        for ours, theirs, tolerance in checks
+        if theirs in reference
+        and abs(float(run0.get(ours, float("nan"))) - float(reference[theirs])) > tolerance
+    ]
     print(f"\nvalidity: Run 0 reproduces docs/baseline_results.json -> "
-          f"{'PASS' if ok else 'FAIL'} "
-          f"(HR {run0['hit_rate_at_10']} vs {reference['hit_rate_at_10']}, "
-          f"MRR {run0['mrr']} vs {reference['mrr']})")
+          f"{'PASS' if not failures else 'FAIL'} "
+          f"({len([t for _, t, _ in checks if t in reference])} fields checked)")
+    for failure in failures:
+        print(f"  MISMATCH {failure}")
     print(f"\ncommitted config: {config_guard.describe()}")
 
 

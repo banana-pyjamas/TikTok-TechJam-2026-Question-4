@@ -394,9 +394,37 @@ _HEDGE_CUES = frozenset({
 # ``tests/test_confidence.py`` pins the overlap that matters.
 _REQUIREMENT_TOKENS = frozenset({
     "requirement", "requirements", "required", "require", "must", "need",
-    "needs", "needed", "specifically", "exactly", "matters", "important",
-    "essential", "critical", "necessary",
+    "needs", "needed", "specifically", "exactly", "matter", "matters",
+    "important", "essential", "critical", "necessary",
 })
+
+# Negations that can turn a requirement word into its opposite. Contraction
+# STEMS ("isn", "doesn") because TOKEN_RE splits on the apostrophe.
+_NEGATION_TOKENS = frozenset({
+    "not", "no", "never", "cannot", "cant", "nope", "isn", "aren", "wasn",
+    "weren", "doesn", "don", "didn", "won", "wouldn", "shouldn", "couldn",
+})
+
+# How far back a negation can reach. "leather is not required" puts one token
+# between them once stopwords are dropped; "not a hard requirement" puts two.
+_NEGATION_WINDOW = 3
+
+
+def _has_unnegated(tokens: list[str], vocabulary: frozenset) -> bool:
+    """True if ``vocabulary`` appears in ``tokens`` without a negation before it.
+
+    "A key requirement is: leather" is a requirement. "Leather is not
+    required" is the shopper WITHDRAWING one, and reading it as a requirement
+    scored the constraint at maximum confidence precisely when they had just
+    relaxed it (D Phase 12 review, P2).
+    """
+    for index, token in enumerate(tokens):
+        if token not in vocabulary:
+            continue
+        window = tokens[max(0, index - _NEGATION_WINDOW):index]
+        if not any(word in _NEGATION_TOKENS for word in window):
+            return True
+    return False
 
 
 def evidence_confidence(message: object) -> float:
@@ -424,9 +452,23 @@ def evidence_confidence(message: object) -> float:
     """
     if not isinstance(message, str) or not message.strip():
         return EC_STATED
-    tokens = set(terms(message))
-    if tokens & _REQUIREMENT_TOKENS:
+    ordered = terms(message)
+    tokens = set(ordered)
+    if _has_unnegated(ordered, _REQUIREMENT_TOKENS):
         return EC_REQUIREMENT
+    # A NEGATED requirement is the shopper relaxing something, which is the
+    # opposite of insisting on it -- so it reads as a hedge, not as a plain
+    # statement and certainly not as a requirement.
+    #
+    # It does NOT drop the slot. "Leather is not required" leaves leather in
+    # play at low confidence rather than deleting it: a false REMOVE destroys
+    # a constraint the shopper still wants, and this codebase already chose
+    # the conservative side of that trade once (see _STRONG_NEGATIONS, where
+    # "drop" is excluded for the same reason). Whether relaxation should
+    # eventually retire the value is an extraction question for the override
+    # layer, not a confidence question, and is deliberately left alone here.
+    if tokens & _REQUIREMENT_TOKENS:
+        return EC_HEDGED
     if tokens & _HEDGE_CUES:
         return EC_HEDGED
     if _REPLACE_CUE_RE.search(message):

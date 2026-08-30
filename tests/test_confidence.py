@@ -577,3 +577,60 @@ class ReliabilityFailureBoundaryTest(unittest.TestCase):
         connection.execute(f"INSERT INTO {TABLE} VALUES ('A', 'black')")
         with self.assertRaises(sqlite3.Error):
             slot_coverage(connection)
+
+
+class NegatedRequirementTest(unittest.TestCase):
+    """D Phase 12 review, P2 — a withdrawn requirement scored as a maximal one.
+
+    "Leather is not required" contains "required", so requirement detection
+    fired and the slot was recorded at EC 1.0 -- maximum insistence, at the
+    exact moment the shopper relaxed it. Inert while Phase 11 weighting was
+    the only consumer; score-bearing from Phase 12, because CP 12.3's decay
+    reads EC whatever that flag says.
+    """
+
+    WITHDRAWN = (
+        "leather is not required",
+        "leather is not a requirement",
+        "leather does not matter",
+        "leather is no longer required",
+        "cotton isn't essential",
+        "the material doesn't matter",
+    )
+
+    def test_a_withdrawn_requirement_is_not_a_requirement(self) -> None:
+        for message in self.WITHDRAWN:
+            self.assertEqual(evidence_confidence(message), EC_HEDGED, message)
+
+    def test_a_real_requirement_still_reads_as_one(self) -> None:
+        for message in ("I need a jacket. A key requirement is: leather.",
+                        "For that, what matters is: cotton.",
+                        "it must be leather",
+                        "leather is essential"):
+            self.assertEqual(evidence_confidence(message), EC_REQUIREMENT,
+                             message)
+
+    def test_a_negated_verb_is_not_a_negated_requirement(self) -> None:
+        # "must not be leather" is still a firm assertion -- the shopper is
+        # insisting, just exclusively. The negation follows the requirement
+        # word rather than preceding it.
+        self.assertEqual(evidence_confidence("it must not be leather"),
+                         EC_REQUIREMENT)
+
+    def test_the_slot_survives_at_lower_confidence(self) -> None:
+        # Deliberately NOT a removal: a false REMOVE destroys a constraint the
+        # shopper still wants, and this codebase already took the conservative
+        # side of that trade once (state._STRONG_NEGATIONS excludes "drop").
+        state = _state("maybe a leather jacket", "leather is not required")
+        self.assertEqual(state.slots["material"]["values"], ["leather"])
+        self.assertAlmostEqual(
+            slot_confidence(_context(state), "material"), EC_HEDGED)
+
+    def test_the_escalation_path_no_longer_fires_on_a_withdrawal(self) -> None:
+        # The exact end-to-end shape D reported: hedged, then "withdrawn",
+        # must not come back as fully confident.
+        state = _state("maybe a leather jacket")
+        self.assertAlmostEqual(state.slots["material"]["confidence"], EC_HEDGED)
+        update_state(state, "leather is not required", 2)
+        self.assertLess(slot_confidence(_context(state), "material"), 1.0,
+                        "withdrawing a requirement must never raise confidence")

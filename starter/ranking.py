@@ -224,6 +224,14 @@ USE_CONFIDENCE_WEIGHTING = False
 # about how the evaluation was sampled, not evidence that ranking by review
 # count serves shoppers. Anyone quoting this number should quote that with it.
 #
+# D's Phase 12 review put a number on exactly that: on a counterfactual set
+# with targets drawn UNIFORMLY from the catalog, the same prior measures
+# -0.012556. Not established harm, and not the set we are scored on -- but it
+# is the honest size of the "this is sampling, not preference" caveat, and
+# every phase built on top of this one inherits it. (D's measurement,
+# reproduced from their report rather than in-tree; the in-tree tool measures
+# the sampling skew that causes it, not the counterfactual itself.)
+#
 # THE WEIGHT IS DELIBERATELY LEFT ON THE TABLE
 #
 # W_POPULARITY is 0.008, an order of magnitude below W_MATCH, exactly as

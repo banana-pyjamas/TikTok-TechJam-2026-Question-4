@@ -32,15 +32,44 @@ the ranking a function of one outlier. ``log1p`` compresses that to 0.69-12.92
 with a median of 2.56 and, unlike ``log``, is defined at zero, so a product
 with no reviews yet is representable rather than an error.
 
-HOW CP 12.4 IS GUARANTEED
+WHAT CP 12.4 ACTUALLY RESTS ON -- AND WHAT IT DOES NOT
 
-Not by a test alone -- by the arithmetic. ``W_POPULARITY`` is an order of
-magnitude below ``ranking.W_MATCH``, so the entire popularity term is worth
-less than a single satisfied constraint, and CP 12.3's decay then shrinks it
-further the moment any constraint exists. A bestseller cannot out-rank a
-product that actually matches what was asked for; it can only win among
-products that are otherwise tied. The same construction as the Phase 8 profile
-prior (``ranking.W_PROFILE``), for the same reason.
+Stated precisely, because an earlier version of this docstring overstated it
+(C Phase 12 review). What holds is a COMPONENT BOUND:
+
+    W_POPULARITY (0.008)  <<  W_MATCH (0.10)
+
+so the entire popularity term is worth less than the attribute term a single
+satisfied constraint contributes, and CP 12.3's decay shrinks it further the
+moment any constraint exists.
+
+That is a bound on two components, NOT a proof about final ranking outcomes.
+``base_score`` varies per candidate and is no part of the bound, so a
+sufficiently large retrieval-score gap can still put a non-matching candidate
+above a matching one -- correctly, and for reasons that have nothing to do
+with popularity. The claim "a bestseller cannot out-rank a product that
+matches" was wrong and is withdrawn.
+
+The empirical claim is separate and narrower: checked at FULL-POOL scope
+across the live dialogue, popularity never inverted a match/non-match
+ordering. That is an observed absence on this dataset, not a structural
+proof for every base-score distribution
+(``python3 -m tools.phase12_popularity``).
+
+THE BOUND IS CONDITIONAL ON USE_CONFIDENCE_WEIGHTING BEING OFF
+
+With Phase 11 weighting ON, a match's attribute term is scaled by EC * MR and
+divided by the constraint count, so it is no longer bounded below by
+``W_MATCH``. Two hedged constraints on poorly-attested slots give a matching
+candidate ``0.10 * 0.04 / 2 = 0.002`` while the prior can still supply
+``0.008 / 1.8 = 0.0044`` -- the inequality inverts, and CP 12.4's arithmetic
+guarantee does not hold (D Phase 12 review, P4). USE_CONFIDENCE_WEIGHTING
+ships False, so this is latent rather than live; ``tests/test_popularity.py``
+pins it so it cannot be enabled without someone seeing it. Turning that flag
+on requires re-deriving W_POPULARITY, not just flipping a boolean.
+
+The same construction as the Phase 8 profile prior (``ranking.W_PROFILE``),
+and it inherits the same caveat.
 """
 
 from __future__ import annotations
