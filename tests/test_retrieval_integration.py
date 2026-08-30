@@ -310,11 +310,17 @@ class AblationFlagDefaultsTest(unittest.TestCase):
         from starter import ranking
 
         self.assertTrue(agent_module.USE_STATE)
-        self.assertFalse(
+        self.assertTrue(
             agent_module.USE_MULTI_ROUTE,
-            "multi-route retrieval measured net-negative in Phase 7 (-0.0157 TS)",
+            "re-enabled in Phase 9: net-negative applied uniformly, net-positive "
+            "when gated by the adaptive strategy",
         )
         self.assertTrue(agent_module.USE_CONSTRAINT_RANKING)
+        self.assertTrue(
+            agent_module.USE_ADAPTIVE_STRATEGY,
+            "the union is only a win while the strategy gates it (+0.0037 TS); "
+            "ungated it costs -0.0157",
+        )
         self.assertFalse(
             ranking.USE_PROFILE,
             "profile prior measured net-negative in Phase 8 (-0.0033 TS)",

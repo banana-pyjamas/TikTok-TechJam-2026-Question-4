@@ -701,7 +701,15 @@ def update_evidence(
         return
     if _NON_ANSWER_RE.search(message):
         return
-    consumed: set[str] = set(_EVIDENCE_MARKER_TOKENS) | _OVERRIDE_PLUMBING
+    # Negation words are grammatical plumbing too: after "not leather" has
+    # been applied as a REMOVE, the bare "not" left behind carries no product
+    # intent and must not become standalone evidence.
+    consumed: set[str] = (
+        set(_EVIDENCE_MARKER_TOKENS)
+        | _OVERRIDE_PLUMBING
+        | _STRONG_NEGATIONS
+        | _ADJACENT_NEGATIONS
+    )
     for incoming in delta.values():
         for value in incoming.get("values", ()):
             consumed.update(terms(value))

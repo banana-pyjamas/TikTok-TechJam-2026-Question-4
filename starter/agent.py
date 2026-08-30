@@ -13,6 +13,7 @@ from starter.contracts import Candidate, Context, RankingResult, SessionState
 from starter.ranking import rank as constraint_rank
 from starter.retrieval import POOL_LIMIT, bm25_route, fuse, retrieve
 from starter.state import update_state
+from starter.strategy import build_strategy
 from starter.text import flatten_text as _text
 from starter.text import terms as _terms
 
@@ -35,17 +36,23 @@ _RESPONSE_MESSAGE = "Here are the closest matches I found."
 # which is the validity check on the whole ablation
 # (``python3 -m tools.phase7_ablation``).
 #
-# USE_MULTI_ROUTE is OFF on the Phase 7 measurement. The multi-route pool is
-# net-NEGATIVE: it raised pool recall (0.770/0.855/0.965 @50/100/300 vs
-# 0.700/0.790/0.940) but RRF fusion degraded precision at rank 10 -- more
-# right answers in the pool, worse ordering at the top. Measured cost with
-# constraint ranking on, TS 0.131194 -> 0.115512, and 2.4x slower retrieval
-# (8.6ms -> 34ms per turn). Phase 5 stays in the tree, correct and tested,
-# until something exploits pool recall better than RRF ordering does.
+# Phase 7 measured the 3-route union net-NEGATIVE applied uniformly: it
+# raised pool recall (0.770/0.855/0.965 @50/100/300 vs 0.700/0.790/0.940) but
+# RRF fusion degraded precision at rank 10 -- more right answers in the pool,
+# worse ordering at the top (TS 0.131194 -> 0.115512). Phase 9 found the
+# damage is confined to BUYING turns, so the union is back ON but gated by
+# USE_ADAPTIVE_STRATEGY. Ungated, it still costs -0.0157.
 # --------------------------------------------------------------------------
 USE_STATE = True
-USE_MULTI_ROUTE = False
+USE_MULTI_ROUTE = True
 USE_CONSTRAINT_RANKING = True
+# Phase 9. Chooses which routes run, per turn, from the shopper's specificity.
+# This is what makes USE_MULTI_ROUTE worth having again: Phase 7 measured the
+# union net-negative applied uniformly, but the damage is confined to BUYING
+# turns. With strategy gating it (buying -> bm25 only, browsing -> bm25 +
+# category) the pool is a net WIN. Turning this off while USE_MULTI_ROUTE is
+# on restores the uniform 3-route union and its -0.0157 penalty.
+USE_ADAPTIVE_STRATEGY = True
 
 # The evaluator scores at most this many recommendations (agent_api_contract
 # turn_request pins top_k to 10). A larger top_k must never yield a longer
@@ -264,8 +271,14 @@ class Agent:
             update_state(state, user_message, turn)
         context = _build_context(session_id, user_message, turn, state)
 
+        # Recomputed from scratch every turn, so it follows the state rather
+        # than latching (CP 9.3/9.4/9.5). Selects routes only -- it never
+        # sees a parent_asin and ranking never reads it (CP 9.6).
+        strategy = build_strategy(context) if USE_ADAPTIVE_STRATEGY else None
+
         if USE_MULTI_ROUTE:
-            pool = retrieve(self.connection, context, POOL_LIMIT)
+            pool = retrieve(self.connection, context, POOL_LIMIT,
+                            strategy.routes if strategy else None)
         else:
             pool = fuse({"bm25": bm25_route(self.connection, context, POOL_LIMIT)},
                         POOL_LIMIT)

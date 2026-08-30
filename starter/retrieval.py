@@ -189,12 +189,20 @@ def fuse(
 
 
 def retrieve(
-    connection: sqlite3.Connection, context: Context, limit: int = POOL_LIMIT
+    connection: sqlite3.Connection,
+    context: Context,
+    limit: int = POOL_LIMIT,
+    routes: list[str] | None = None,
 ) -> list[Candidate]:
-    """UNION of every route, Reciprocal-Rank-Fusion ordered.
+    """UNION of the selected routes, Reciprocal-Rank-Fusion ordered.
 
-    Returns up to ``limit`` ``Candidate`` objects; each carries its raw
-    per-route scores in ``route_scores``, so ``route_sources`` names every
-    route that surfaced it.
+    ``routes`` restricts which routes run -- this is the one knob the
+    adaptive strategy (Phase 9) turns. ``None`` runs them all. Returns up to
+    ``limit`` ``Candidate`` objects; each carries its raw per-route scores in
+    ``route_scores``, so ``route_sources`` names every route that surfaced it.
     """
-    return fuse(run_routes(connection, context, limit), limit)
+    per_route = run_routes(connection, context, limit)
+    if routes is not None:
+        allowed = set(routes)
+        per_route = {name: rows for name, rows in per_route.items() if name in allowed}
+    return fuse(per_route, limit)
