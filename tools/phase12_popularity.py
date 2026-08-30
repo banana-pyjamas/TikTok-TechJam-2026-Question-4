@@ -110,8 +110,17 @@ def main() -> None:
         config_guard.set_flag("ranking", "USE_POPULARITY", enabled)
         results[enabled] = run(f"USE_POPULARITY={enabled}")
     config_guard.restore_committed_flags()
-    if abs(results[False]["recommended_technical_score"] - 0.134566) > 1e-9:
-        raise SystemExit("OFF no longer reproduces the pre-Phase-12 score")
+    # Pinned to the CURRENT pipeline, not to a frozen historical arm. This
+    # tool measures what USE_POPULARITY is worth NOW, and Phase 14 changed
+    # what "now" is: its OFF arm was 0.134566 when the ladder ended at Phase
+    # 12 and is 0.178651 with the reranker in front of it. Asserting the old
+    # literal made this tool exit on its own staleness, which is the failure
+    # phase10 and phase11 each spent two phases in.
+    if abs(results[True]["recommended_technical_score"]
+           - config_guard.COMMITTED_TECHNICAL_SCORE) > 1e-9:
+        raise SystemExit(
+            "the ON arm no longer reproduces the committed score, so this is "
+            "not a measurement of the shipped pipeline")
     print("   " + format_test("popularity ON vs OFF",
                               mcnemar(hits_by_sample(results[False]),
                                       hits_by_sample(results[True]))))

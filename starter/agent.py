@@ -14,6 +14,12 @@ from starter.contracts import Candidate, Context, RankingResult, SessionState
 from starter.ranking import POPULARITY_KEY, RELIABILITY_KEY
 from starter.ranking import rank as constraint_rank
 from starter.reliability import match_reliability, slot_coverage
+# The MODULE, not its names. `config_guard.set_flag` assigns to the defining
+# module, so `from starter.reranker import USE_SEMANTIC_RERANK` would bind a
+# COPY here that the ablation could never flip -- the flag would read ON in
+# the guard's report and OFF in the code it governs. Phase 12 closed that
+# exact hole once already; it is not being reopened one module over.
+from starter import reranker
 from starter.retrieval import (DEFAULT_ROUTES, POOL_LIMIT, bm25_route,
                                fuse, retrieve)
 from starter.state import update_state
@@ -326,5 +332,20 @@ class Agent:
             # zero and the final score is the retrieval score alone -- pure
             # retrieval order, through the same code path.
             metadata = {}
-        result = constraint_rank(pool, context, metadata, _effective_k(top_k))
+
+        # Phase 14. Ranking normally truncates to the 10 the response carries;
+        # a reranker handed 10 rows cannot reach the 11-50 band where Phase 13
+        # measured most recoverable targets sitting, so with the flag ON the
+        # ranked list is kept RERANK_TOP_N deep and re-truncated by
+        # `_to_response`. With the flag OFF the depth, the call and the cost
+        # are all exactly what Phase 12 shipped.
+        if reranker.USE_SEMANTIC_RERANK:
+            result = constraint_rank(
+                pool, context, metadata,
+                max(_effective_k(top_k), reranker.RERANK_TOP_N))
+            result = reranker.rerank(
+                result, context,
+                reranker.build_scorer(self.connection, pool, context))
+        else:
+            result = constraint_rank(pool, context, metadata, _effective_k(top_k))
         return _to_response(result, top_k)

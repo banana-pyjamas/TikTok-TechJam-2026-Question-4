@@ -41,18 +41,25 @@ DATASET = "data/public_set.jsonl"
 # one?", which hides the case where an earlier layer is a net cost that a
 # later one merely compensates for. Run 3b isolates that.
 RUNS = [
-    # label, USE_STATE, USE_MULTI_ROUTE, USE_CONSTRAINT_RANKING, USE_POPULARITY
-    ("Run 0   baseline", False, False, False, False),
-    ("Run 1   +state", True, False, False, False),
-    ("Run 2   +retrieval", True, True, False, False),
-    ("Run 3   +ranking", True, True, True, False),
-    ("Run 4   +popularity", True, True, True, True),
-    ("Run 3b  ranking, BM25 pool", True, False, True, False),
+    # label, USE_STATE, USE_MULTI_ROUTE, USE_CONSTRAINT_RANKING,
+    # USE_POPULARITY, USE_SEMANTIC_RERANK
+    ("Run 0   baseline", False, False, False, False, False),
+    ("Run 1   +state", True, False, False, False, False),
+    ("Run 2   +retrieval", True, True, False, False, False),
+    ("Run 3   +ranking", True, True, True, False, False),
+    ("Run 4   +popularity", True, True, True, True, False),
+    ("Run 5   +rerank", True, True, True, True, True),
+    ("Run 3b  ranking, BM25 pool", True, False, True, False, False),
 ]
 
-# Run 4 is the stack that SHIPS. Popularity gets its own rung rather than
-# riding with USE_CONSTRAINT_RANKING because it is worth more than every layer
-# before it combined, and folding it into another rung would hide that.
+# The one run that is not a rung of the ladder, named so the table can tell
+# them apart without counting rows.
+OFF_LADDER = "Run 3b  ranking, BM25 pool"
+
+# Run 5 is the stack that SHIPS. Popularity and the reranker each get their
+# own rung rather than riding with USE_CONSTRAINT_RANKING because they are the
+# two largest single contributions in the ladder, and folding either into
+# another rung would hide that.
 
 # Every ablation flag in the WHOLE package, so a run pins the entire
 # configuration. Scoped package-wide via ``tools.config_guard`` after D-N2:
@@ -67,6 +74,10 @@ PINNED_FLAGS = {
     ("ranking", "USE_PROFILE"),
     ("ranking", "USE_CONFIDENCE_WEIGHTING"),
     ("ranking", "USE_POPULARITY"),
+    # Phase 14. Added here in the same change that added the flag: leaving it
+    # out is precisely the D-N2 failure this guard exists for, and the guard
+    # duly refused to run until it was listed.
+    ("reranker", "USE_SEMANTIC_RERANK"),
 }
 
 
@@ -82,11 +93,13 @@ def main() -> None:
     print(f"ready in {time.time() - started:.1f}s\n")
 
     results = []
-    for label, use_state, use_routes, use_ranking, use_popularity in RUNS:
+    for (label, use_state, use_routes, use_ranking, use_popularity,
+         use_rerank) in RUNS:
         config_guard.set_flag("agent", "USE_STATE", use_state)
         config_guard.set_flag("agent", "USE_MULTI_ROUTE", use_routes)
         config_guard.set_flag("agent", "USE_CONSTRAINT_RANKING", use_ranking)
         config_guard.set_flag("ranking", "USE_POPULARITY", use_popularity)
+        config_guard.set_flag("reranker", "USE_SEMANTIC_RERANK", use_rerank)
         config_guard.set_flag("ranking", "USE_PROFILE", False)
         # Pinned to its COMMITTED value, not to the rung. This ladder measures
         # the stack that ships, and Phase 11 weighting ships OFF (measured
@@ -109,8 +122,13 @@ def main() -> None:
 
     print(f"\n{'run':28}{'HR@10':>8}{'MRR':>10}{'MTTC':>8}{'MTTC|hit':>10}"
           f"{'TS':>10}{'d prev':>9}{'d base':>9}")
+    # Keyed on the LABEL, not on a slice index. `results[:5]` / `results[5]`
+    # was hardcoded to a six-run list; adding the Phase 14 rung silently
+    # pushed Run 3b -- the off-ladder cell this whole tool exists for -- out
+    # of the table without any error.
     previous = base
-    for result in results[:5]:  # the linear ladder
+    ladder = [r for r in results if r["_label"] != OFF_LADDER]
+    for result in ladder:
         score = result["recommended_technical_score"]
         conditional = mttc_given_hit(result)
         print(f"{result['_label']:28}{result['hit_rate_at_10']:>8.4f}"
@@ -118,7 +136,7 @@ def main() -> None:
               f"{(conditional if conditional is not None else float('nan')):>10.3f}"
               f"{score:>10.6f}{score - previous:>+9.6f}{score - base:>+9.6f}")
         previous = score
-    off_ladder = results[5]
+    off_ladder = by_label[OFF_LADDER]
     score = off_ladder["recommended_technical_score"]
     conditional = mttc_given_hit(off_ladder)
     print(f"{off_ladder['_label']:28}{off_ladder['hit_rate_at_10']:>8.4f}"
@@ -166,7 +184,8 @@ def main() -> None:
         ("ranking | bm25 pool", "Run 1   +state", "Run 3b  ranking, BM25 pool"),
         ("ranking | union pool  *", "Run 2   +retrieval", "Run 3   +ranking"),
         ("popularity | full stack  *", "Run 3   +ranking", "Run 4   +popularity"),
-        ("whole shipped stack", "Run 0   baseline", "Run 4   +popularity"),
+        ("rerank | full stack  *", "Run 4   +popularity", "Run 5   +rerank"),
+        ("whole shipped stack", "Run 0   baseline", "Run 5   +rerank"),
     ]
     for label, before_label, after_label in pairs:
         test = mcnemar(hits_by_sample(by_label[before_label]),

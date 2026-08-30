@@ -63,6 +63,7 @@ STARTER_MODULES = (
     "profile",
     "ranking",
     "reliability",
+    "reranker",
     "retrieval",
     "state",
     "strategy",
@@ -81,6 +82,10 @@ COMMITTED_FLAGS: dict[tuple[str, str], Any] = {
     ("ranking", "USE_PROFILE"): False,
     ("ranking", "USE_CONFIDENCE_WEIGHTING"): False,
     ("ranking", "USE_POPULARITY"): True,
+    # Phase 14. Note the module: `agent.respond` reads this through
+    # `starter.reranker`, not through a name imported into `agent`, so that
+    # `set_flag` actually reaches the branch it governs.
+    ("reranker", "USE_SEMANTIC_RERANK"): True,
 }
 
 # Not flags, but they decide what gets measured just as hard. ``DEFAULT_ROUTES``
@@ -115,6 +120,11 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
     ("popularity", "W_POPULARITY"): 0.008,
     ("popularity", "DEFAULT_SCALE"): 13.0,
     ("popularity", "DEFAULT_MISSING"): 0.5,
+    # Phase 14. The reranker's window and its latency budget both decide what
+    # gets measured: the window bounds which candidates the stage can even
+    # reach, and the budget decides whether a slow scorer's answer counts.
+    ("reranker", "RERANK_TOP_N"): 50,
+    ("reranker", "RERANK_BUDGET_MS"): 150.0,
 }
 
 
@@ -133,7 +143,7 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
 # historical reference rather than the committed one.)
 #
 # Moving the committed score means updating this line in the same change.
-COMMITTED_TECHNICAL_SCORE = 0.182258
+COMMITTED_TECHNICAL_SCORE = 0.223740
 
 
 def _module(name: str):

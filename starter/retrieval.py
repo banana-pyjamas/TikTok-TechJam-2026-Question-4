@@ -156,21 +156,30 @@ DEFAULT_ROUTES = ("bm25", "category")
 # the target, measured by re-running the evaluator with the answer injected
 # into those 51 sessions and no others:
 #
-#   injected at the pool FLOOR (fusion_score 0)   TS +0.0000    0/51 convert
-#   injected at the pool HEAD  (best fusion)      TS +0.2419   50/51 convert
+#   injected at the pool FLOOR (fusion_score 0)   TS +0.0047    1/51 convert
+#   injected at the pool HEAD  (best fusion)      TS +0.2225   51/51 convert
 #
-# So retrieval's downstream value is somewhere in [+0.0000, +0.2419] TS, and
-# RANK matters more than presence: getting the target into the pool at the
-# bottom is worth literally nothing through the current ranker. The "+0.025
-# TS ceiling" quoted for this phase in 7c52e87 is neither bound -- it was an
-# extrapolation, and it moved the HitRate term only, while TS = 0.5*HR +
-# 0.3*MRR + 0.2*eff and a recovered hit moves all three. Applied consistently
-# and at the corrected scope it is +0.0624. Withdrawn in favour of the bracket.
+# So retrieval's downstream value is somewhere in [+0.0047, +0.2225] TS, and
+# RANK matters far more than presence: getting the target into the pool at the
+# bottom recovers one session in fifty-one. The "+0.025 TS ceiling" quoted for
+# this phase in 7c52e87 is neither bound -- it was an extrapolation, and it
+# moved the HitRate term only, while TS = 0.5*HR + 0.3*MRR + 0.2*eff and a
+# recovered hit moves all three. Applied consistently and at the corrected
+# scope it is +0.0766. Withdrawn in favour of the bracket.
 #
-# Meanwhile 107 targets reach the pool on a turn that COULD have scored and
-# still lose: ~2.1x the session count of the whole retrieval surface, all of
+# Meanwhile 96 targets reach the pool on a turn that COULD have scored and
+# still lose: ~1.9x the session count of the whole retrieval surface, all of
 # it downstream of this file. (7c52e87 published 120 and 3.2x; both terms of
 # that ratio were session-level and override-blind.)
+#
+# WHICH NUMBERS HERE MOVE WHEN THE RANKER MOVES. The retrieval facts do not:
+# 162/149/51/38/13 and +0.2550 recall are properties of the pool and were
+# identical before and after Phase 14 shipped. The CONVERSION facts do, and
+# these are stated against the committed ranker WITH the Phase 14 reranker ON.
+# Phase 14 moved in-pool conversion from 42/149 to 53/149, which is why the
+# in-pool losses fell from 107 to 96 and the ratio from 2.1x to 1.9x. Re-run
+# the gate after any ranking change; it reads the committed configuration and
+# will disagree with this comment rather than quietly agree with it.
 #
 # 4  RETRACTION: THE VOCABULARY ARGUMENT MEASURED THE SIMULATOR
 #
@@ -199,8 +208,13 @@ DEFAULT_ROUTES = ("bm25", "category")
 # WHAT WOULD REOPEN THIS: a vendored encoder that runs offline on the
 # certified interpreter. The bracket in (3) says what to measure about it
 # FIRST -- the rank it assigns the target, not the recall it achieves, since
-# recall alone bought +0.0000. The same encoder question gates Phase 14, and
-# reranking the 107 in-pool losses works on ~2.1x the sessions.
+# recall alone bought +0.0047.
+#
+# That advice has since been taken. Phase 14 (starter/reranker.py) attacked
+# the in-pool losses rather than the retrieval surface and measured +0.041 TS
+# with a purely LEXICAL scorer, which is the strongest evidence available that
+# this file was the wrong place to spend the effort. The encoder question is
+# still open there, and the reranker's scorer interface is where it lands.
 # --------------------------------------------------------------------------
 
 

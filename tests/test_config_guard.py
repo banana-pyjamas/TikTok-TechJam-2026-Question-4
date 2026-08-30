@@ -64,15 +64,25 @@ class ModuleListCompletenessTest(unittest.TestCase):
         config_guard.assert_module_list_is_complete()
 
     def test_a_new_module_carrying_a_flag_is_not_silent(self) -> None:
-        # Verbatim the case D built on a copied tree: the semantic reranker the
-        # roadmap adds at Phase 13/14, carrying an unpinned flag.
-        new_module = Path(starter.__file__).resolve().parent / "reranker.py"
-        self.assertFalse(new_module.exists(), "pick a name that does not exist")
-        new_module.write_text("USE_SEMANTIC_RERANK = True\n", encoding="utf-8")
+        # This case used to name `reranker.py`, the module the roadmap adds at
+        # Phase 13/14. Phase 14 shipped it, and the test kept passing only
+        # because its own precondition failed first -- one assertion away from
+        # writing over the real module and then unlink()ing it in `finally`.
+        # The placeholder must therefore be a name the package does NOT have,
+        # and the precondition is what keeps the cleanup safe. If Phase 15
+        # ships `clarify.py`, move this to the next unused name.
+        package = Path(starter.__file__).resolve().parent
+        new_module = package / "clarify.py"
+        self.assertFalse(
+            new_module.exists(),
+            f"{new_module.name} now exists -- point this test at a module the "
+            "package does not have, or the cleanup below deletes real code",
+        )
+        new_module.write_text("USE_CLARIFY = True\n", encoding="utf-8")
         try:
             with self.assertRaises(SystemExit) as caught:
                 config_guard.assert_module_list_is_complete()
-            self.assertIn("reranker", str(caught.exception))
+            self.assertIn("clarify", str(caught.exception))
             # And it must also trip the flag guard, which calls it.
             with self.assertRaises(SystemExit):
                 config_guard.assert_all_flags_pinned(
