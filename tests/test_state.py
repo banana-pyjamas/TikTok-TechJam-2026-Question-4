@@ -32,16 +32,32 @@ def _values(state: SessionState, slot: str) -> list[str]:
 
 class SchemaTest(unittest.TestCase):
     def test_every_stored_slot_matches_the_approved_schema(self) -> None:
+        # CP 2.1 plus the extension contracts.py always reserved: "Phase 11
+        # EC / MR attach as extra keys on the same dict". `confidence` is
+        # optional and absent means 1.0, so a fully-meant slot is still
+        # byte-identical to its pre-Phase-11 self.
         state = _run("black leather jacket size 10 nike under $100")
         self.assertTrue(state.slots)
+        allowed = {"values", "cardinality", "confidence"}
         for name, entry in state.slots.items():
             self.assertIn(name, SLOT_CARDINALITY)
             self.assertEqual(set(entry) >= {"values", "cardinality"}, True)
             self.assertIsInstance(entry["values"], list)
             self.assertTrue(all(isinstance(v, str) for v in entry["values"]))
             self.assertEqual(entry["cardinality"], SLOT_CARDINALITY[name])
-            if name != "budget":
-                self.assertEqual(set(entry), {"values", "cardinality"})
+            extra = allowed | ({"bounds"} if name == "budget" else set())
+            self.assertLessEqual(set(entry), extra, name)
+            if "confidence" in entry:
+                self.assertIsInstance(entry["confidence"], float)
+                self.assertGreater(entry["confidence"], 0.0)
+                self.assertLess(entry["confidence"], 1.0,
+                                "a confidence of 1.0 is stored as absence")
+
+    def test_a_fully_meant_slot_is_unchanged_from_before_phase_11(self) -> None:
+        # Requirement phrasing gives EC 1.0, which is not stored -- so the
+        # entry has exactly the pre-Phase-11 key set.
+        state = _run("I need a jacket. A key requirement is: leather.")
+        self.assertEqual(set(state.slots["material"]), {"values", "cardinality"})
 
     def test_single_valued_slots_hold_at_most_one_value(self) -> None:
         state = _run("jacket", "coat", "dress")  # category re-stated each turn

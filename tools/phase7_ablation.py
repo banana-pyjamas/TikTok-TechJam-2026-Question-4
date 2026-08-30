@@ -59,6 +59,7 @@ PINNED_FLAGS = {
     ("agent", "USE_MULTI_ROUTE"),
     ("agent", "USE_CONSTRAINT_RANKING"),
     ("ranking", "USE_PROFILE"),
+    ("ranking", "USE_CONFIDENCE_WEIGHTING"),
 }
 
 
@@ -79,6 +80,12 @@ def main() -> None:
         config_guard.set_flag("agent", "USE_MULTI_ROUTE", use_routes)
         config_guard.set_flag("agent", "USE_CONSTRAINT_RANKING", use_ranking)
         config_guard.set_flag("ranking", "USE_PROFILE", False)
+        # Pinned to its COMMITTED value, not to the rung. This ladder measures
+        # the stack that ships, and Phase 11 weighting ships OFF (measured
+        # exactly inert -- see ranking.USE_CONFIDENCE_WEIGHTING). Its own arm
+        # is measured by tools/phase11_confidence.py, which is where a claim
+        # about it belongs.
+        config_guard.set_flag("ranking", "USE_CONFIDENCE_WEIGHTING", False)
         started = time.time()
         result = evaluate(agent, samples, catalog_ids, categories, products)
         result["_label"] = label

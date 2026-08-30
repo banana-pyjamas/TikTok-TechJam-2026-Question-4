@@ -61,6 +61,7 @@ STARTER_MODULES = (
     "contracts",
     "profile",
     "ranking",
+    "reliability",
     "retrieval",
     "state",
     "strategy",
@@ -77,6 +78,7 @@ COMMITTED_FLAGS: dict[tuple[str, str], Any] = {
     ("agent", "USE_MULTI_ROUTE"): True,
     ("agent", "USE_CONSTRAINT_RANKING"): True,
     ("ranking", "USE_PROFILE"): False,
+    ("ranking", "USE_CONFIDENCE_WEIGHTING"): False,
 }
 
 # Not flags, but they decide what gets measured just as hard. ``DEFAULT_ROUTES``
@@ -100,6 +102,13 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
     ("vocabulary", "MIN_DOCUMENT_FREQUENCY"): 2,
     ("vocabulary", "NOISE_FLOOR_POOL"): 8,
     ("vocabulary", "INDEX_TERM_LIMIT"): 40,
+    # Phase 11.
+    ("reliability", "DEFAULT_RELIABILITY"): 1.0,
+    ("reliability", "MIN_RELIABILITY"): 0.1,
+    ("state", "EC_REQUIREMENT"): 1.0,
+    ("state", "EC_CORRECTION"): 0.9,
+    ("state", "EC_STATED"): 0.7,
+    ("state", "EC_HEDGED"): 0.4,
 }
 
 

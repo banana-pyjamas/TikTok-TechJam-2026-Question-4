@@ -50,6 +50,7 @@ from typing import Any
 
 from starter.contracts import Candidate, Context, RankingResult
 from starter.profile import extract_evidence, profile_match_ratio
+from starter.reliability import reliability_of
 
 # Ablation flag for the profile prior (Phase 8).
 #
@@ -118,7 +119,66 @@ DIAGNOSTIC_KEYS = frozenset({
     "matched",
     "violated",
     "route_sources",
+    "constraint_weights",
 })
+
+
+# Ablation flag for confidence/reliability weighting (Phase 11).
+#
+# OFF reproduces Phase 6 scoring exactly: every active slot counts 1, whatever
+# the shopper's phrasing and whatever the catalog's coverage of that field.
+#
+# ON, each slot's contribution is scaled by Evidence Confidence (how firmly the
+# shopper asserted it, from state.slots[slot]["confidence"]) times Match
+# Reliability (how much the catalog's verdict on that field is worth, from
+# reliability.match_reliability). See ``constraint_weights`` for the three
+# quadrants and ``score_candidate`` for the arithmetic.
+#
+# OFF: measured EXACTLY inert on the public set. Not "small" -- 0 sessions
+# gained, 0 lost, and HR / MRR / MTTC / TS identical to six decimals, so no
+# target's rank moved anywhere in 200 sessions
+# (``python3 -m tools.phase11_confidence``).
+#
+# The census in that tool says why, and it is a property of this data rather
+# than of the mechanism: 76% of turns carry at most ONE active constraint, and
+# with one constraint the weight is a uniform scaling of every candidate's
+# attribute term -- a monotone rescale that cannot reorder anything. Only the
+# 24% of turns whose slots have DIFFERENT weights can move a ranking. And the
+# case the phase is chiefly for, CP 11.4 (firmly meant, poorly attested),
+# occurs 4 times in 1762 constraint occurrences: 0.2%.
+#
+# So this ships OFF on the same rule as USE_PROFILE: the burden is on the
+# change, and "changes nothing measurable" is not evidence for it. Unlike
+# USE_PROFILE there is no measured harm either -- the honest summary is no
+# evidence in either direction, and weighting uniformly shrinks the attribute
+# term, which is the one component McNemar establishes on this set
+# (+6, 6/0, p = 0.0312). Shrinking the only thing that works, for no measured
+# gain, is not a trade to make blind.
+#
+# Everything is built, tested (CP 11.3/11.4/11.5 in tests/test_confidence.py)
+# and one flag from live. EC itself is computed and stored regardless: it is
+# state, not scoring, and Phase 15 wants it.
+USE_CONFIDENCE_WEIGHTING = False
+
+# Where ``rank`` reads per-slot Match Reliability out of ``Context.derived``.
+# A generic container by the contracts rule: a new signal adds a key, never a
+# frozen field. Absent -> every slot fully reliable -> Phase 6 behaviour.
+RELIABILITY_KEY = "match_reliability"
+
+
+def slot_confidence(context: Context, slot: str) -> float:
+    """CP 11.1 -- Evidence Confidence for one active slot.
+
+    Absent means 1.0, which is the convention ``validate_delta`` established
+    in Phase 4 and is what makes ``USE_CONFIDENCE_WEIGHTING = False`` exact.
+    """
+    entry = context.state.slots.get(slot) if isinstance(context.state.slots, dict) else None
+    if not isinstance(entry, dict):
+        return 1.0
+    value = entry.get("confidence")
+    if not isinstance(value, (int, float)) or value != value:
+        return 1.0
+    return max(0.0, min(1.0, float(value)))
 
 
 def active_constraints(
@@ -206,33 +266,86 @@ def classify(slot: str, values: list[str], meta: dict[str, Any],
     return MATCH if any(value in present for value in values) else VIOLATION
 
 
+def constraint_weights(
+    context: Context, constraints: dict[str, list[str]]
+) -> dict[str, float]:
+    """CP 11.3 / 11.4 / 11.5 -- ``EC * MR`` per active slot.
+
+    Evidence Confidence says how firmly the shopper asserted the constraint;
+    Match Reliability says how much the catalog's verdict on that field is
+    worth. A slot's verdict is only as good as the weaker of the two, and the
+    product is the graded form of that:
+
+        high EC, high MR   ~1.00   full weight, Phase 6 behaviour  (CP 11.3)
+        high EC, low MR     0.10   a real requirement we cannot check
+                                   reliably: it must not bury the target,
+                                   which was never in the catalog's terms
+                                   to begin with                   (CP 11.4)
+        low EC,  high MR    0.40   a passing remark: the catalog can check it
+                                   perfectly, and it still must not act as a
+                                   filter                          (CP 11.5)
+
+    Neither factor can reach zero (``reliability.MIN_RELIABILITY``, and
+    ``validate_delta`` drops a zero confidence outright), so no constraint is
+    ever silently switched off -- it is discounted, and the ranked list is
+    still a ranking rather than a filtered set.
+    """
+    reliabilities = None
+    if isinstance(context.derived, dict):
+        reliabilities = context.derived.get(RELIABILITY_KEY)
+    return {
+        slot: slot_confidence(context, slot) * reliability_of(reliabilities, slot)
+        for slot in constraints
+    }
+
+
 def score_candidate(
     candidate: Candidate,
     constraints: dict[str, list[str]],
     meta: dict[str, Any],
     bounds: dict[str, Any] | None = None,
     profile_evidence: dict[str, Any] | None = None,
+    weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Constraint verdicts plus the score components for one candidate."""
+    """Constraint verdicts plus the score components for one candidate.
+
+    ``weights`` maps a slot to ``EC * MR`` -- how much this slot's verdict is
+    worth, given both how firmly the shopper asserted it and how much the
+    catalog's evidence for that field is worth (Phase 11). ``None`` means
+    every slot counts 1, which is Phase 6 exactly.
+    """
     matched: list[str] = []
     violated: list[str] = []
-    # The denominator is the active constraint count -- the same for every
-    # candidate this turn, so UNKNOWN rescales but never reorders. See the
-    # module docstring for why per-candidate "known verdicts only" was
-    # rejected.
+    # The denominator stays the active constraint COUNT, as in Phase 6:
+    # identical for every candidate this turn, so UNKNOWN rescales but never
+    # reorders. Evidence quality multiplies the NUMERATOR only.
+    #
+    # It has to be this way round. Normalising by the summed weight instead
+    # would cancel the weight whenever one constraint is active -- a single
+    # slot at EC 0.4 would give 0.4/0.4 = full penalty, and CP 11.5 would be
+    # violated by the very mechanism meant to satisfy it. Dividing by the
+    # count leaves the unclaimed share of the budget simply unclaimed, so a
+    # constraint that is half-meant on a field we half-trust contributes a
+    # quarter of the evidence it otherwise would and retrieval order carries
+    # the rest. That is the safe direction to fail in.
     considered = 0
+    matched_weight = 0.0
+    violated_weight = 0.0
     for slot, values in constraints.items():
         verdict = classify(slot, values, meta, bounds)
+        weight = 1.0 if weights is None else float(weights.get(slot, 1.0))
         considered += 1
         if verdict == MATCH:
             matched.append(slot)
+            matched_weight += weight
         elif verdict == VIOLATION and slot in VIOLATION_SLOTS:
             violated.append(slot)
+            violated_weight += weight
 
     base = float(candidate.metadata.get("fusion_score", 0.0))
     if considered:
-        attribute_score = W_MATCH * (len(matched) / considered)
-        violation_penalty = W_PENALTY * (len(violated) / considered)
+        attribute_score = W_MATCH * (matched_weight / considered)
+        violation_penalty = W_PENALTY * (violated_weight / considered)
     else:
         attribute_score = 0.0
         violation_penalty = 0.0
@@ -252,6 +365,10 @@ def score_candidate(
         "matched": matched,
         "violated": violated,
         "route_sources": list(candidate.route_sources),
+        # CP 11.1 / 11.2 made visible: why each verdict counted for as much
+        # as it did. Same for every candidate in a turn, but carried per
+        # candidate so a diagnostics row explains its own score.
+        "constraint_weights": dict(weights or {}),
     }
 
 
@@ -276,6 +393,7 @@ def rank(
     profile_evidence = (
         extract_evidence(context.state.user_profile) if USE_PROFILE else None
     )
+    weights = constraint_weights(context, constraints) if USE_CONFIDENCE_WEIGHTING else None
     scored: list[tuple[Candidate, dict[str, Any]]] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -284,7 +402,7 @@ def rank(
         seen.add(candidate.parent_asin)
         detail = score_candidate(
             candidate, constraints, metadata.get(candidate.parent_asin, {}),
-            bounds, profile_evidence,
+            bounds, profile_evidence, weights,
         )
         scored.append((candidate, detail))
 

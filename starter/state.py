@@ -349,6 +349,82 @@ def _is_negated(message: str, value: str) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------
+# Evidence Confidence (Phase 11, CP 11.1) -- how much the shopper meant it.
+#
+# Phase 4 already built the RECEIVING half of this: validate_delta cleans and
+# clamps a `confidence` on a delta entry, and stores it when below 1.0. What
+# was missing is a producer and a persister. Extraction now assigns one and
+# apply_delta carries it onto the slot entry, where the contract has always
+# said it would live ("Evidence Confidence ... live inside slot entries from
+# Phase 11", contracts.py).
+#
+# Absent means 1.0 throughout, which is Phase 4's convention and is what keeps
+# every pre-existing caller and stored state unchanged.
+#
+# Confidence is per MESSAGE, not per value: a turn is one speech act, and the
+# phrasing that marks it as a requirement or as thinking-out-loud governs the
+# whole turn. The known cost is that "I'm looking for jackets. A key
+# requirement is: leather" gives the CATEGORY the same 1.0 as the material.
+# Per-value attribution by cue proximity is possible -- `_governing_cue`
+# already does exactly that for operations -- and is the obvious refinement if
+# a measurement ever shows it matters.
+# --------------------------------------------------------------------------
+
+EC_REQUIREMENT = 1.0   # "a key requirement is", "what matters is", "must"
+EC_CORRECTION = 0.9    # an override: the shopper stopped to correct us
+EC_STATED = 0.7        # a plain declarative mention
+EC_HEDGED = 0.4        # "maybe", "something", "I guess", "still exploring"
+
+# Thinking-out-loud markers. Overlaps ``strategy.BROWSING_CUES`` and
+# ``strategy.FILLER_CUES`` in spirit and partly in content, but is NOT shared
+# with them: that vocabulary answers "is this shopper browsing?" about a whole
+# session, this one answers "did they commit to this constraint?" about one
+# turn, and the two have already been observed to want different words.
+# Importing across would also invert the dependency -- strategy imports state.
+_HEDGE_CUES = frozenset({
+    "maybe", "perhaps", "possibly", "probably", "might", "guess",
+    "something", "anything", "some", "kind", "sort", "ish", "like",
+    "prefer", "preferably", "ideally", "leaning", "considering", "thinking",
+    "exploring", "browsing", "unsure", "open", "whatever", "either",
+})
+
+# Requirement phrasing. Kept here rather than imported from ``strategy`` for
+# the dependency reason above; the two lists are expected to drift apart, and
+# ``tests/test_confidence.py`` pins the overlap that matters.
+_REQUIREMENT_TOKENS = frozenset({
+    "requirement", "requirements", "required", "require", "must", "need",
+    "needs", "needed", "specifically", "exactly", "matters", "important",
+    "essential", "critical", "necessary",
+})
+
+
+def evidence_confidence(message: object) -> float:
+    """CP 11.1 -- how firmly this turn asserts whatever it mentions.
+
+    Deterministic and offline, read from the shopper's phrasing:
+
+        1.0  requirement language -- "a key requirement is", "what matters is"
+        0.9  a correction -- they stopped to replace something we had
+        0.4  hedged -- "maybe", "something", "still exploring"
+        0.7  otherwise: a plain declarative mention
+
+    Requirement language outranks a hedge ("I need something black" is a
+    requirement that happens to contain "something"), and a correction
+    outranks a hedge for the same reason -- the shopper spent a turn on it.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return EC_STATED
+    tokens = set(terms(message))
+    if tokens & _REQUIREMENT_TOKENS:
+        return EC_REQUIREMENT
+    if _REPLACE_CUE_RE.search(message):
+        return EC_CORRECTION
+    if tokens & _HEDGE_CUES:
+        return EC_HEDGED
+    return EC_STATED
+
+
 def extract_delta(message: str) -> dict[str, dict[str, Any]]:
     """Deterministic slot + operation extraction for one message.
 
@@ -403,6 +479,13 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
         if cue == "replace":
             entry["cue"] = "replace"
         delta["budget"] = entry
+
+    # CP 11.1 -- one confidence for the turn, on every entry it produced.
+    # validate_delta clamps it and drops it again when it is 1.0, so a fully
+    # confident turn produces exactly the delta it produced before Phase 11.
+    confidence = evidence_confidence(message)
+    for entry in delta.values():
+        entry["confidence"] = confidence
 
     return delta
 
@@ -573,6 +656,45 @@ def superseded_values(state: SessionState, slot: str) -> set[str]:
     return out
 
 
+def _confidence_of(entry: object) -> float:
+    """A slot or delta entry's Evidence Confidence; absent means fully meant.
+
+    The absent-is-1.0 convention is Phase 4's (``_clean_confidence``), kept so
+    that state written before Phase 11 -- and any entry from a turn the
+    shopper stated plainly -- reads back identically.
+    """
+    if not isinstance(entry, dict):
+        return 1.0
+    value = entry.get("confidence")
+    if not isinstance(value, (int, float)) or value != value:
+        return 1.0
+    return max(0.0, min(1.0, float(value)))
+
+
+def _carry_confidence(entry: dict, incoming: object, existing: object,
+                      combine) -> None:
+    """Put the surviving Evidence Confidence on a rebuilt slot entry.
+
+    ``combine=max`` for a union (ADD), which keeps the firmest thing the
+    shopper has said about the slot; ``combine=None`` for SET / REPLACE, where
+    the new statement stands alone and the old confidence dies with the old
+    value.
+
+    Stored only when below 1.0, mirroring ``validate_delta``: a fully
+    confident slot entry is byte-identical to its pre-Phase-11 self, which is
+    what makes the ranking flag's OFF position exact.
+    """
+    confidence = _confidence_of(incoming)
+    # Combine only against a slot that actually existed. "Absent means 1.0" is
+    # right for reading a stored entry but wrong as a starting value for a
+    # max: a brand-new hedged slot would combine against the 1.0 of the
+    # nothing that preceded it and come out fully confident.
+    if combine is not None and isinstance(existing, dict):
+        confidence = combine(confidence, _confidence_of(existing))
+    if confidence < 1.0:
+        entry["confidence"] = confidence
+
+
 def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int) -> None:
     """Apply a delta to ``state.slots`` -- the single authoritative write.
 
@@ -654,12 +776,29 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
         if operation == "ADD":
             added = [v for v in positive if v not in existing_values]
             if not added:
+                # Nothing new to union -- but the shopper may have restated an
+                # existing value MORE firmly ("maybe leather" -> "leather is a
+                # hard requirement"). That is not a no-op: the escalation is
+                # the whole content of the turn (CP 11.1). Confidence only
+                # ever rises here; a hedged restatement of something already
+                # insisted on does not soften it.
+                if existing is not None:
+                    firmer = max(_confidence_of(incoming), _confidence_of(existing))
+                    if firmer > _confidence_of(existing):
+                        existing.pop("confidence", None)
+                        if firmer < 1.0:
+                            existing["confidence"] = firmer
+                        _record(state, turn, slot, "ADD", positive[0])
                 continue
             entry: dict[str, Any] = {
                 "values": existing_values + added, "cardinality": cardinality,
             }
             if new_bounds is not None:
                 entry["bounds"] = new_bounds
+            # CP 11.1 -- a union keeps the STRONGEST statement made about the
+            # slot. Adding a hedged value to a slot the shopper already
+            # insisted on does not soften the insistence.
+            _carry_confidence(entry, incoming, existing, combine=max)
             state.slots[slot] = entry
             for value in added:
                 _record(state, turn, slot, "ADD", value)
@@ -672,12 +811,19 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
             and existing["values"] == positive
             and existing.get("bounds") == new_bounds
             and not remove
+            # Restating the same constraint MORE firmly is not a no-op: the
+            # shopper escalated from "maybe leather" to "it must be leather"
+            # and the slot has to record that (CP 11.1).
+            and _confidence_of(incoming) <= _confidence_of(existing)
         )
         if unchanged:
             continue
         entry = {"values": list(positive), "cardinality": cardinality}
         if new_bounds is not None:
             entry["bounds"] = new_bounds
+        # CP 11.1 -- a replacement replaces the confidence too: the old
+        # statement is gone, so its confidence must not outlive it.
+        _carry_confidence(entry, incoming, existing, combine=None)
         state.slots[slot] = entry
         if operation == "SET":
             op_name = "SET"

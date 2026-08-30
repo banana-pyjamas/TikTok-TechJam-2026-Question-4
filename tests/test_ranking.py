@@ -33,6 +33,10 @@ FROZEN_DIAGNOSTIC_KEYS = {
     "matched",
     "violated",
     "route_sources",
+    # Phase 11 (CP 11.1 / 11.2). Added deliberately: a diagnostics row now has
+    # to explain not just WHICH constraints a candidate matched but how much
+    # each one was worth, since that is what decides the score.
+    "constraint_weights",
 }
 
 _EMPTY_META = {

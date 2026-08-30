@@ -10,7 +10,9 @@ from starter.catalog_meta import create_table as create_meta_table
 from starter.catalog_meta import lookup as meta_lookup
 from starter.catalog_meta import signals as meta_signals
 from starter.contracts import Candidate, Context, RankingResult, SessionState
+from starter.ranking import RELIABILITY_KEY
 from starter.ranking import rank as constraint_rank
+from starter.reliability import match_reliability, slot_coverage
 from starter.retrieval import (DEFAULT_ROUTES, POOL_LIMIT, bm25_route,
                                fuse, retrieve)
 from starter.state import update_state
@@ -191,6 +193,10 @@ class Agent:
         self.connection = sqlite3.connect(":memory:")
         self._states: dict[str, SessionState] = {}
         self._build_index()
+        # Phase 11 (CP 11.2). Six aggregate queries over the side table, once
+        # per agent -- never per turn. A property of the frozen catalog, so
+        # there is nothing per-session about it.
+        self._reliability = match_reliability(slot_coverage(self.connection))
 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
@@ -272,6 +278,9 @@ class Agent:
         if USE_STATE:
             update_state(state, user_message, turn)
         context = _build_context(session_id, user_message, turn, state)
+        # CP 11.2 -- per-slot Match Reliability reaches ranking through the
+        # generic `derived` bag, not a new frozen field (contracts rule).
+        context.derived[RELIABILITY_KEY] = self._reliability
 
         # No build_strategy() call here on purpose. The strategy does not gate
         # retrieval -- mode-adaptive route selection measured worth +0.000298,
