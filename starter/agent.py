@@ -11,7 +11,7 @@ from starter.catalog_meta import lookup as meta_lookup
 from starter.catalog_meta import signals as meta_signals
 from starter.contracts import Candidate, Context, RankingResult, SessionState
 from starter.ranking import rank as constraint_rank
-from starter.retrieval import POOL_LIMIT, retrieve
+from starter.retrieval import POOL_LIMIT, bm25_route, fuse, retrieve
 from starter.state import update_state
 from starter.text import flatten_text as _text
 from starter.text import terms as _terms
@@ -21,6 +21,24 @@ from starter.text import terms as _terms
 # SELECT projection and the ORDER BY can never drift apart (CP 1.3).
 _BM25_RANK = "bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)"
 _RESPONSE_MESSAGE = "Here are the closest matches I found."
+
+# --------------------------------------------------------------------------
+# Ablation flags (Phase 7 controlled comparison; Phase 16 staged enablement).
+#
+# All default ON, so the committed behaviour is exactly the full pipeline and
+# a disabled feature never silently changes anything. Turning one OFF must
+# restore the behaviour of the phase before it landed:
+#
+#   USE_STATE               run the deterministic state manager each turn
+#   USE_MULTI_ROUTE         3-route UNION pool vs the BM25-only pool
+#   USE_CONSTRAINT_RANKING  constraint scoring vs pure retrieval order
+#
+# With all three OFF the agent reproduces the official weak-BM25 baseline,
+# which is the validity check on the whole ablation.
+# --------------------------------------------------------------------------
+USE_STATE = True
+USE_MULTI_ROUTE = True
+USE_CONSTRAINT_RANKING = True
 
 # The evaluator scores at most this many recommendations (agent_api_contract
 # turn_request pins top_k to 10). A larger top_k must never yield a longer
@@ -230,9 +248,22 @@ class Agent:
         if session_id not in self._states:
             raise RuntimeError("reset must be called before respond")
         state = self._states[session_id]
-        update_state(state, user_message, turn)
+        if USE_STATE:
+            update_state(state, user_message, turn)
         context = _build_context(session_id, user_message, turn, state)
-        pool = retrieve(self.connection, context, POOL_LIMIT)
-        metadata = meta_lookup(self.connection, [c.parent_asin for c in pool])
+
+        if USE_MULTI_ROUTE:
+            pool = retrieve(self.connection, context, POOL_LIMIT)
+        else:
+            pool = fuse({"bm25": bm25_route(self.connection, context, POOL_LIMIT)},
+                        POOL_LIMIT)
+
+        if USE_CONSTRAINT_RANKING:
+            metadata = meta_lookup(self.connection, [c.parent_asin for c in pool])
+        else:
+            # Every slot then classifies UNKNOWN, so the constraint terms are
+            # zero and the final score is the retrieval score alone -- pure
+            # retrieval order, through the same code path.
+            metadata = {}
         result = constraint_rank(pool, context, metadata, _effective_k(top_k))
         return _to_response(result, top_k)
