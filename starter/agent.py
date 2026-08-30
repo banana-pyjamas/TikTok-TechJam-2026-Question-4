@@ -25,19 +25,26 @@ _RESPONSE_MESSAGE = "Here are the closest matches I found."
 # --------------------------------------------------------------------------
 # Ablation flags (Phase 7 controlled comparison; Phase 16 staged enablement).
 #
-# All default ON, so the committed behaviour is exactly the full pipeline and
-# a disabled feature never silently changes anything. Turning one OFF must
-# restore the behaviour of the phase before it landed:
+# Turning one OFF restores the behaviour of the phase before it landed:
 #
 #   USE_STATE               run the deterministic state manager each turn
 #   USE_MULTI_ROUTE         3-route UNION pool vs the BM25-only pool
 #   USE_CONSTRAINT_RANKING  constraint scoring vs pure retrieval order
 #
 # With all three OFF the agent reproduces the official weak-BM25 baseline,
-# which is the validity check on the whole ablation.
+# which is the validity check on the whole ablation
+# (``python3 -m tools.phase7_ablation``).
+#
+# USE_MULTI_ROUTE is OFF on the Phase 7 measurement. The multi-route pool is
+# net-NEGATIVE: it raised pool recall (0.770/0.855/0.965 @50/100/300 vs
+# 0.700/0.790/0.940) but RRF fusion degraded precision at rank 10 -- more
+# right answers in the pool, worse ordering at the top. Measured cost with
+# constraint ranking on, TS 0.131194 -> 0.115512, and 2.4x slower retrieval
+# (8.6ms -> 34ms per turn). Phase 5 stays in the tree, correct and tested,
+# until something exploits pool recall better than RRF ordering does.
 # --------------------------------------------------------------------------
 USE_STATE = True
-USE_MULTI_ROUTE = True
+USE_MULTI_ROUTE = False
 USE_CONSTRAINT_RANKING = True
 
 # The evaluator scores at most this many recommendations (agent_api_contract

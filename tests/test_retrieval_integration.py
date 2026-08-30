@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from starter import agent as agent_module
 from starter.agent import Agent
 from starter.contracts import Context, SessionState
 from starter.retrieval import POOL_LIMIT, retrieve, run_routes
@@ -180,6 +181,10 @@ class SessionIsolationThroughRetrievalTest(_AgentFixture):
 class AuxiliaryRouteFailureTest(_AgentFixture):
     """D item 4 — DOCUMENTED LIMITATION.
 
+    These exercise the multi-route path specifically, so they enable
+    ``USE_MULTI_ROUTE`` explicitly rather than depending on the default
+    (which Phase 7 measured OFF).
+
     ``category_route`` and ``attribute_route`` are core deterministic
     components (principle J lists category and attribute retrieval among the
     parts that must work offline), not optional enrichment. A raise inside
@@ -193,6 +198,11 @@ class AuxiliaryRouteFailureTest(_AgentFixture):
     costs recall but cannot corrupt state (the state manager has already
     committed or rolled back before retrieval runs).
     """
+
+    def setUp(self) -> None:
+        self._multi_route = mock.patch.object(agent_module, "USE_MULTI_ROUTE", True)
+        self._multi_route.start()
+        self.addCleanup(self._multi_route.stop)
 
     @staticmethod
     def _broken(name: str):
@@ -287,28 +297,54 @@ class TenTurnSmokeTest(_AgentFixture):
             self.assertTrue(all(isinstance(v, str) and v for v in slot["values"]))
 
 
+class AblationFlagDefaultsTest(unittest.TestCase):
+    """The committed flag defaults carry a measured score, so pin them --
+    a change should be deliberate, not accidental.
+
+    Measured by ``python3 -m tools.phase7_ablation`` on the public set:
+      state ON, multi-route OFF, ranking ON -> HR 0.1550 / TS 0.131194
+      turning multi-route back ON           -> HR 0.1350 / TS 0.115512
+    """
+
+    def test_committed_defaults(self) -> None:
+        self.assertTrue(agent_module.USE_STATE)
+        self.assertFalse(
+            agent_module.USE_MULTI_ROUTE,
+            "multi-route retrieval measured net-negative in Phase 7 (-0.0157 TS)",
+        )
+        self.assertTrue(agent_module.USE_CONSTRAINT_RANKING)
+
+
 class RetrievalCostTest(_AgentFixture):
     """D item 8 — FTS queries per turn and retrieval latency."""
 
-    def test_at_most_one_fts_query_per_route_per_turn(self) -> None:
+    def _count_queries(self, multi_route: bool) -> tuple[int, int]:
         agent = Agent(self._catalog_path)
         agent.reset("cost", _PROFILE)
-        agent.respond("cost", "black leather jacket", 1, 10)  # warm the state
-
-        statements: list[str] = []
-        agent.connection.set_trace_callback(statements.append)
-        try:
-            agent.respond("cost", "actually denim size 10", 2, 10)
-        finally:
-            agent.connection.set_trace_callback(None)
-
+        with mock.patch.object(agent_module, "USE_MULTI_ROUTE", multi_route):
+            agent.respond("cost", "black leather jacket", 1, 10)  # warm the state
+            statements: list[str] = []
+            agent.connection.set_trace_callback(statements.append)
+            try:
+                agent.respond("cost", "actually denim size 10", 2, 10)
+            finally:
+                agent.connection.set_trace_callback(None)
         selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
-        fts = [s for s in selects if "products MATCH" in s]
-        meta = [s for s in selects if "product_meta" in s]
-        print(f"\nqueries per turn: {len(fts)} FTS + {len(meta)} metadata")
-        self.assertEqual(len(fts), 3, "one FTS query per route, no N+1")
-        self.assertEqual(len(meta), 1, "one batched metadata lookup, no N+1")
-        self.assertEqual(len(selects), 4)
+        return (
+            len([s for s in selects if "products MATCH" in s]),
+            len([s for s in selects if "product_meta" in s]),
+        )
+
+    def test_query_count_per_turn_in_both_pool_configurations(self) -> None:
+        multi_fts, multi_meta = self._count_queries(True)
+        single_fts, single_meta = self._count_queries(False)
+        print(f"\nqueries per turn: multi-route {multi_fts} FTS + {multi_meta} meta; "
+              f"bm25-only {single_fts} FTS + {single_meta} meta")
+        self.assertEqual(multi_fts, 3, "one FTS query per route, no N+1")
+        self.assertEqual(single_fts, 1, "bm25-only pool issues a single FTS query")
+        # The batched metadata lookup is one query either way -- no N+1.
+        self.assertEqual(multi_meta, 1)
+        self.assertEqual(single_meta, 1)
 
     def test_retrieval_latency_is_reported(self) -> None:
         state = SessionState(session_id="lat")
