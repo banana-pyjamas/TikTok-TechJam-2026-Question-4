@@ -85,6 +85,58 @@ POOL_LIMIT = 300
 # measured worth +0.000298 and is not worth a knob.
 DEFAULT_ROUTES = ("bm25", "category")
 
+# --------------------------------------------------------------------------
+# Phase 13 (dense retrieval) -- NOT IMPLEMENTED, on measured grounds.
+#
+# The roadmap gates the phase on evidence: "Only do this if measurements
+# justify it." They do not. `python3 -m tools.phase13_dense_gate` reproduces
+# all of the following.
+#
+# 1. THE CEILING IS SMALL. 162 of 200 targets already reach the pool; 38 never
+#    do, and those 38 are the entire surface a retrieval route can attack. At
+#    the measured 25.9% in-pool conversion, recovering EVERY one of them is
+#    worth ~9.9 hits -- about +0.05 HR, +0.025 TS. Meanwhile 120 targets sit
+#    IN the pool and still lose. The conversion failure is 3.2x the size of
+#    the entire retrieval ceiling.
+#
+# 2. IT IS NOT THE FAILURE DENSE RETRIEVAL FIXES. Dense retrieval bridges
+#    vocabulary mismatch -- the shopper says "warm", the catalog says
+#    "insulated". Of the 38 missed targets, the number sharing NO vocabulary
+#    with what the shopper said is ZERO. All 38 already share tokens; 6 share
+#    five or more. There is no gap to bridge. These are discrimination
+#    failures among thousands of products that match the query equally well.
+#
+# 3. THE MISSES ARE INFORMATION-STARVED, NOT SEMANTICS-STARVED. 23 of the 38
+#    are browsing sessions, which open with a bare category and never add
+#    anything, because the agent never asks a question. Median shopper input
+#    across the misses is 5 tokens and 0.95 filled slots. No encoder recovers
+#    one product from 50,000 given "Basketball Men" and nothing else. This is
+#    the same conclusion the Phase 9 retrieval evidence reached from the other
+#    direction, and it points at Phase 15, not here.
+#
+# 4. THE BEST SHIPPABLE ALTERNATIVE MEASURES WORSE. Run, not assumed: TF-IDF
+#    cosine over the same indexed terms gets recall@300 of 66.0% against the
+#    committed set's 81.0%. It does recover 7 of the 38 -- worth ~0.005 TS
+#    through a union -- while finding 30 fewer targets overall.
+#
+# And no trained encoder can ship here: none is installed, the starter is
+# standard-library only, and submission_rules notes the organizer "may disable
+# network access" for final scoring, so a model would have to be vendored and
+# validated in a sandbox we cannot see. A random-projection embedding of the
+# same bag of words is not a substitute -- it approximates the inner products
+# measured in (4) rather than adding to them.
+#
+# CP 13.2 ("dense OFF preserves previous behaviour") therefore holds trivially
+# and permanently. No USE_DENSE flag is added: a flag whose ON position has no
+# implementation is a knob that changes nothing, which this repo has deleted
+# twice already.
+#
+# WHAT WOULD REOPEN THIS: a vendored encoder that runs offline. The same
+# encoder question gates Phase 14, and the numbers above say Phase 14 is the
+# better place to spend it -- reranking the 120 in-pool losses has 3.2x the
+# headroom of retrieving the 38 that never arrive.
+# --------------------------------------------------------------------------
+
 
 def _fts_or(tokens: list[str]) -> str:
     unique = list(dict.fromkeys(token for token in tokens if len(token) > 1))
