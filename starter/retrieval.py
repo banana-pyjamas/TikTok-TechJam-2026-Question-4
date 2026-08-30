@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
+from typing import Iterable
 
 from starter.contracts import Candidate, Context
 from starter.text import terms
@@ -48,6 +49,16 @@ _ROUTE_ORDER = ("bm25", "category", "attribute")
 _RRF_K = 60
 
 POOL_LIMIT = 300
+
+# The routes the agent actually runs. Measured, not assumed:
+#   bm25 only                    TS 0.131194
+#   bm25 + category                 0.134566   <- shipped
+#   bm25 + category + attribute     0.115512
+# The attribute route is excluded because it costs 0.019 -- it re-ranks on
+# terms the BM25 route already covers, and its unique candidates arrive too
+# far down to help. This is a retrieval constant, not a per-turn decision:
+# selecting per mode was measured worth +0.000298 and is not worth a knob.
+DEFAULT_ROUTES = ("bm25", "category")
 
 
 def _fts_or(tokens: list[str]) -> str:
@@ -133,16 +144,27 @@ ROUTES: dict[str, object] = {
 
 
 def run_routes(
-    connection: sqlite3.Connection, context: Context, limit: int = POOL_LIMIT
+    connection: sqlite3.Connection,
+    context: Context,
+    limit: int = POOL_LIMIT,
+    routes: Iterable[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
-    """Every route's raw result list, keyed by route name.
+    """Execute the selected routes and return their raw result lists.
 
-    Exposed so reviewers can measure per-route target presence and candidate
-    loss stage without re-implementing the routes.
+    ``routes`` selects which route functions actually RUN. ``None`` runs
+    every route, preserving the Phase 5 reviewer diagnostics. An unselected
+    route is never called, so it issues no query -- selection happens before
+    execution, not by discarding results afterwards.
+
+    Unknown names are ignored rather than raising: a strategy naming a route
+    that does not exist should degrade to fewer routes, not break the turn.
     """
+    selected = ROUTES if routes is None else {
+        name: ROUTES[name] for name in routes if name in ROUTES
+    }
     return {
         name: route(connection, context, limit)  # type: ignore[operator]
-        for name, route in ROUTES.items()
+        for name, route in selected.items()
     }
 
 
@@ -196,13 +218,9 @@ def retrieve(
 ) -> list[Candidate]:
     """UNION of the selected routes, Reciprocal-Rank-Fusion ordered.
 
-    ``routes`` restricts which routes run -- this is the one knob the
-    adaptive strategy (Phase 9) turns. ``None`` runs them all. Returns up to
+    ``routes`` selects which routes EXECUTE -- the unselected ones are never
+    called and issue no query. ``None`` runs them all. Returns up to
     ``limit`` ``Candidate`` objects; each carries its raw per-route scores in
     ``route_scores``, so ``route_sources`` names every route that surfaced it.
     """
-    per_route = run_routes(connection, context, limit)
-    if routes is not None:
-        allowed = set(routes)
-        per_route = {name: rows for name, rows in per_route.items() if name in allowed}
-    return fuse(per_route, limit)
+    return fuse(run_routes(connection, context, limit, routes), limit)

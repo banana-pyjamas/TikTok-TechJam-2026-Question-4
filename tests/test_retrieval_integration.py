@@ -214,17 +214,26 @@ class AuxiliaryRouteFailureTest(_AgentFixture):
         return mock.patch.dict("starter.retrieval.ROUTES", {name: raiser})
 
     def test_auxiliary_route_failure_propagates_rather_than_degrading(self) -> None:
+        # Only a SELECTED route can fail a turn -- an unselected route is
+        # never called (see run_routes). "category" is in the shipped plan.
         self._agent.reset("f", _PROFILE)
-        for name in ("category", "attribute"):
-            with self._broken(name):
-                with self.assertRaises(RuntimeError, msg=name):
-                    self._agent.respond("f", "black leather jacket", 1, 10)
+        with self._broken("category"):
+            with self.assertRaises(RuntimeError):
+                self._agent.respond("f", "black leather jacket", 1, 10)
+
+    def test_an_unselected_route_cannot_break_a_turn(self) -> None:
+        # "attribute" is not in the shipped route plan, so a bug in it is
+        # inert rather than fatal -- selection happens before execution.
+        self._agent.reset("f", _PROFILE)
+        with self._broken("attribute"):
+            self.assert_valid_payload(
+                self._agent.respond("f", "black leather jacket", 1, 10))
 
     def test_state_is_not_corrupted_by_a_route_failure(self) -> None:
         self._agent.reset("f", _PROFILE)
         self._agent.respond("f", "black leather jacket", 1, 10)
         before = copy.deepcopy(self._agent._states["f"])
-        with self._broken("attribute"):
+        with self._broken("category"):
             with self.assertRaises(RuntimeError):
                 self._agent.respond("f", "actually denim", 2, 10)
         after = self._agent._states["f"]
@@ -316,10 +325,15 @@ class AblationFlagDefaultsTest(unittest.TestCase):
             "when gated by the adaptive strategy",
         )
         self.assertTrue(agent_module.USE_CONSTRAINT_RANKING)
-        self.assertTrue(
-            agent_module.USE_ADAPTIVE_STRATEGY,
-            "the union is only a win while the strategy gates it (+0.0037 TS); "
-            "ungated it costs -0.0157",
+        self.assertFalse(
+            hasattr(agent_module, "USE_ADAPTIVE_STRATEGY"),
+            "route selection is a retrieval constant, not an adaptive knob",
+        )
+        from starter.retrieval import DEFAULT_ROUTES
+
+        self.assertEqual(
+            tuple(DEFAULT_ROUTES), ("bm25", "category"),
+            "the attribute route costs 0.019 TS and is excluded",
         )
         self.assertFalse(
             ranking.USE_PROFILE,
@@ -352,7 +366,10 @@ class RetrievalCostTest(_AgentFixture):
         single_fts, single_meta = self._count_queries(False)
         print(f"\nqueries per turn: multi-route {multi_fts} FTS + {multi_meta} meta; "
               f"bm25-only {single_fts} FTS + {single_meta} meta")
-        self.assertEqual(multi_fts, 3, "one FTS query per route, no N+1")
+        # The shipped plan selects bm25 + category, so exactly TWO routes
+        # execute -- the attribute route is never called (B Phase 9 blocker:
+        # selection must happen before execution, not by discarding results).
+        self.assertEqual(multi_fts, 2, "only the selected routes may execute")
         self.assertEqual(single_fts, 1, "bm25-only pool issues a single FTS query")
         # The batched metadata lookup is one query either way -- no N+1.
         self.assertEqual(multi_meta, 1)

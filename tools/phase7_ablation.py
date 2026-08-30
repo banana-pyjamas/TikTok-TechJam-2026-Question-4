@@ -40,6 +40,12 @@ RUNS = [
     ("Run 3b  ranking, BM25 pool", True, False, True),
 ]
 
+# Every ablation flag in the agent, so a run pins the WHOLE configuration.
+# A flag added later and not set here would silently drift the recorded
+# numbers while the validity check still passed -- which is exactly what
+# happened when USE_ADAPTIVE_STRATEGY landed.
+ALL_FLAGS = ("USE_STATE", "USE_MULTI_ROUTE", "USE_CONSTRAINT_RANKING")
+
 
 def main() -> None:
     print("building index...", flush=True)
@@ -48,6 +54,17 @@ def main() -> None:
     samples = load_jsonl(DATASET)
     catalog_ids, categories, products = catalog_index(CATALOG)
     print(f"ready in {time.time() - started:.1f}s\n")
+
+    missing = [
+        name for name in dir(agent_module)
+        if name.startswith("USE_") and name not in ALL_FLAGS
+    ]
+    if missing:
+        raise SystemExit(
+            f"ablation would not pin these flags: {missing}. Add them to "
+            "ALL_FLAGS and to each run's configuration before trusting any "
+            "number this tool prints."
+        )
 
     results = []
     for label, use_state, use_routes, use_ranking in RUNS:

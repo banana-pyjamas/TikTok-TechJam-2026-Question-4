@@ -100,6 +100,17 @@ _OVERRIDE_PLUMBING = {
     "nevermind", "disregard", "what", "need", "needed",
 }
 
+def is_non_answer(message: object) -> bool:
+    """True when a turn declines to add information rather than stating a
+    preference -- "ask me about one specific attribute", "no preference".
+
+    Public because more than one layer needs it: evidence distillation must
+    not store such a turn, and the strategy classifier must not read its
+    wording as the shopper's own vocabulary.
+    """
+    return isinstance(message, str) and bool(_NON_ANSWER_RE.search(message))
+
+
 SLOT_CARDINALITY: dict[str, str] = {
     "category": "single",
     "size": "single",
@@ -699,7 +710,7 @@ def update_evidence(
     """
     if not message or not message.strip():
         return
-    if _NON_ANSWER_RE.search(message):
+    if is_non_answer(message):
         return
     # Negation words are grammatical plumbing too: after "not leather" has
     # been applied as a REMOVE, the bare "not" left behind carries no product

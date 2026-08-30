@@ -45,8 +45,14 @@ class CP91BuyingClassification(unittest.TestCase):
             BUYING,
         )
 
-    def test_concrete_volunteered_detail_counts(self) -> None:
-        self.assertEqual(classify_mode(_ctx("A belt. Buckle closure")), BUYING)
+    def test_requirement_language_is_sticky_across_silent_turns(self) -> None:
+        # Stating a requirement is not un-done by going quiet. On this
+        # harness the shopper goes quiet immediately once we stop asking.
+        ctx = _ctx("I need a necklace. A key requirement is: alloy.")
+        self.assertEqual(classify_mode(ctx), BUYING)
+        ctx.user_message = "Those options are not quite right yet."
+        ctx.turn = 2
+        self.assertEqual(classify_mode(ctx), BUYING)
 
     def test_specifics_beat_browsing_language(self) -> None:
         # Naming something checkable wins even while saying "exploring".
@@ -112,12 +118,19 @@ class CP94BrowsingToBuyingTransition(unittest.TestCase):
                          user_message="black Adidas size 9 under $100", state=state)
         self.assertEqual(classify_mode(second), BUYING)
 
-    def test_routes_change_with_the_mode(self) -> None:
+    def test_the_mode_changes_but_the_route_plan_is_uniform(self) -> None:
+        # Corrected after the Phase 9 review. The first version varied routes
+        # by mode and reported the difference as this checkpoint's gain; a
+        # controlled test showed the damage was the ATTRIBUTE route,
+        # uniformly, and mode-adaptive selection is worth +0.000298. Routes
+        # are now fixed; the mode is kept for Phase 15, not for retrieval.
         browsing = build_strategy(_ctx("shoes for traveling"))
         buying = build_strategy(_ctx("shoes for traveling", "black size 9"))
-        self.assertNotEqual(browsing.routes, buying.routes)
-        self.assertIn("bm25", browsing.routes)
-        self.assertIn("bm25", buying.routes)
+        self.assertEqual(browsing.mode, BROWSING)
+        self.assertEqual(buying.mode, BUYING)
+        self.assertEqual(browsing.routes, buying.routes)
+        self.assertEqual(buying.routes, ["bm25", "category"])
+        self.assertNotIn("attribute", buying.routes)
 
 
 class CP95OverrideReOrchestration(unittest.TestCase):
@@ -170,6 +183,40 @@ class SpecificSlotVocabularyTest(unittest.TestCase):
     def test_category_is_not_a_specific_slot(self) -> None:
         # Naming a category is how BOTH modes open, so it must not decide.
         self.assertNotIn("category", SPECIFIC_SLOTS)
+
+
+class EvaluatorBoilerplateMustNotDecideModeTest(unittest.TestCase):
+    """Phase 9 review: 90% of turns are the harness's "no new information"
+    reply, and the word "options" in it collided with BROWSING_CUES -- so the
+    harness's phrasing, not the shopper, was deciding the mode."""
+
+    STUCK = ("Those options are not quite right yet. "
+             "Ask me about one specific attribute.")
+
+    def test_a_non_answer_does_not_flip_a_buying_session_to_browsing(self) -> None:
+        state = SessionState(session_id="b")
+        update_state(state, "I need a necklace. A key requirement is: alloy.", 1)
+        self.assertEqual(
+            classify_mode(Context(session_id="b", turn=1,
+                                  user_message="alloy necklace", state=state)),
+            BUYING)
+        # Same state, next turn carries no new information.
+        self.assertEqual(
+            classify_mode(Context(session_id="b", turn=2,
+                                  user_message=self.STUCK, state=state)),
+            BUYING, "a non-answer must not overwrite what state already knows")
+
+    def test_a_non_answer_leaves_a_browsing_session_browsing(self) -> None:
+        state = SessionState(session_id="w")
+        update_state(state, "I'm looking for shoes, but I'm still exploring", 1)
+        self.assertEqual(
+            classify_mode(Context(session_id="w", turn=2,
+                                  user_message=self.STUCK, state=state)),
+            BROWSING)
+
+    def test_the_shoppers_own_browsing_words_still_count(self) -> None:
+        # The cue mechanism itself is intact -- only harness text is ignored.
+        self.assertEqual(classify_mode(_ctx("just show me some options")), BROWSING)
 
 
 if __name__ == "__main__":

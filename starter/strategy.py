@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any
 
 from starter.contracts import Context, Strategy
+from starter.state import is_non_answer
 from starter.text import terms
 
 BUYING, BROWSING, UNKNOWN = "buying", "browsing", "unknown"
@@ -69,24 +70,43 @@ SOFT_CUES = frozenset({
     "fall", "autumn", "outdoor", "indoor", "gift", "present",
 })
 
-# Route plans per mode -- chosen by measurement, not symmetry.
+# Filler that survives tokenization but names nothing. Without this,
+# "still exploring" reads as volunteered concrete detail.
+FILLER_CUES = frozenset({
+    "still", "just", "really", "quite", "very", "kind", "sort", "bit",
+    "little", "more", "less", "much", "thing", "things", "one", "ones",
+    "prefer", "like", "love", "help", "find", "show", "give", "get",
+})
+
+# Everything that is NOT evidence of a checkable spec.
+_VAGUE_TOKENS = SOFT_CUES | FILLER_CUES
+
+# Route plan. UNIFORM across modes -- corrected after the Phase 9 review.
 #
-# Phase 7 found the 3-route union net-negative OVERALL. Splitting by mode
-# shows why: it is net-negative for BUYING and net-positive for BROWSING.
-# When the shopper has named specifics, BM25 precision at rank 10 is already
-# good and extra routes only dilute the head. When they are still exploring,
-# the query is vague and category breadth genuinely adds reach.
+# The first version of this file made buying and browsing select different
+# route sets and reported the difference as the checkpoint's gain. That was
+# wrong: mode and route set covaried, so the experiment could not separate
+# them. Holding the route set fixed and removing the classifier entirely:
 #
-# Measured on the public set (multi-route enabled, strategy selecting):
-#   both modes all 3 routes           TS 0.115512
-#   buying bm25+attr / browse bm25+cat   0.108088
-#   buying bm25 / browse bm25+category   0.134864   <- chosen
-# The attribute route adds nothing to browsing either (adding it scores
-# identically), so it is left out and the turn stays cheaper.
+#   bm25 only                      TS 0.131194
+#   bm25 + category                   0.134566   <- chosen, no classifier
+#   bm25 + category + attribute       0.115512
+#
+# The damage is the ATTRIBUTE route, uniformly. It is not about buying vs
+# browsing at all. Mode-adaptive route selection is worth +0.000298 over the
+# uniform plan -- one thirty-fourth of the +0.01 that a single flipped
+# session is worth on this set, and far below the +-0.04 noise floor. So the
+# routes are fixed and the mode does NOT gate them.
+#
+# `classify_mode` is kept because Phase 15 wants it (how hard to push for a
+# clarification differs between a shopper who has named specifics and one
+# still exploring), not because it earns anything here.
+_ROUTES = ["bm25", "category"]
+_WEIGHTS = {"bm25": 1.0, "category": 1.0}
 _ROUTE_PLAN: dict[str, tuple[list[str], dict[str, float]]] = {
-    BUYING: (["bm25"], {"bm25": 1.0}),
-    BROWSING: (["bm25", "category"], {"bm25": 1.0, "category": 1.0}),
-    UNKNOWN: (["bm25", "category"], {"bm25": 1.0, "category": 1.0}),
+    BUYING: (_ROUTES, _WEIGHTS),
+    BROWSING: (_ROUTES, _WEIGHTS),
+    UNKNOWN: (_ROUTES, _WEIGHTS),
 }
 
 
@@ -107,27 +127,20 @@ def _has_active_evidence(context: Context) -> bool:
     )
 
 
-def _has_concrete_evidence(context: Context) -> bool:
-    """Active free text that names something checkable, not just a feeling
-    or an occasion.
+def _evidence_tokens(context: Context) -> set[str]:
+    """Every token the shopper has volunteered as still-active free text.
 
-    "Buckle closure" is concrete; "comfortable ... for traveling" is not.
-    Category words are excluded because naming a category is how both modes
-    open.
+    Superseded evidence is excluded, so an override cannot leave stale
+    wording deciding the mode (CP 9.5).
     """
-    category = context.state.slots.get("category")
-    category_tokens = {
-        token
-        for value in (category.get("values", ()) if isinstance(category, dict) else ())
-        for token in terms(str(value))
-    }
+    out: set[str] = set()
     for entry in context.state.evidence:
         if not isinstance(entry, dict) or entry.get("status") != "active":
             continue
-        tokens = set(terms(entry.get("normalized", "")))
-        if tokens - SOFT_CUES - category_tokens:
-            return True
-    return False
+        normalized = entry.get("normalized", "")
+        if isinstance(normalized, str):
+            out.update(terms(normalized))
+    return out
 
 
 def classify_mode(context: Context) -> str:
@@ -138,17 +151,24 @@ def classify_mode(context: Context) -> str:
     Absent specifics, explicit browsing language decides. A shopper who has
     volunteered nothing but a category is exploring.
     """
-    tokens = set(terms(context.user_message))
+    # A turn that declines to add information is not the shopper's own
+    # vocabulary -- reading its wording as a browsing cue would let the
+    # harness's phrasing decide the mode. On the public set 90% of turns are
+    # such a non-answer, and "options" in it collided with BROWSING_CUES.
+    message = "" if is_non_answer(context.user_message) else context.user_message
+    tokens = set(terms(message))
     if _specific_slot_count(context) >= 1:
         return BUYING
-    if tokens & REQUIREMENT_CUES:
+    # Requirement language is read from the whole accumulated session, not
+    # just this turn. Stating a requirement is not something a shopper
+    # un-does by going quiet, and on this harness they go quiet immediately:
+    # once the agent stops learning anything, every later turn is the same
+    # "no new information" reply. Reading only the current turn would flip a
+    # buying session to browsing the moment it stopped talking.
+    if tokens & REQUIREMENT_CUES or _evidence_tokens(context) & REQUIREMENT_CUES:
         return BUYING
     if tokens & BROWSING_CUES:
         return BROWSING
-    if _has_concrete_evidence(context):
-        # Volunteered detail we could not slot, e.g. "Buckle closure".
-        # Soft qualities and occasions do not count -- see SOFT_CUES.
-        return BUYING
     return BROWSING
 
 
