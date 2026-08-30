@@ -303,8 +303,12 @@ class RetrievalCostTest(_AgentFixture):
             agent.connection.set_trace_callback(None)
 
         selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
-        print(f"\nFTS queries per turn: {len(selects)}")
-        self.assertEqual(len(selects), 3, "one query per route, no N+1")
+        fts = [s for s in selects if "products MATCH" in s]
+        meta = [s for s in selects if "product_meta" in s]
+        print(f"\nqueries per turn: {len(fts)} FTS + {len(meta)} metadata")
+        self.assertEqual(len(fts), 3, "one FTS query per route, no N+1")
+        self.assertEqual(len(meta), 1, "one batched metadata lookup, no N+1")
+        self.assertEqual(len(selects), 4)
 
     def test_retrieval_latency_is_reported(self) -> None:
         state = SessionState(session_id="lat")

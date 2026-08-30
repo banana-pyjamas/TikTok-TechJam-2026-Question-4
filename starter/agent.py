@@ -5,7 +5,12 @@ import json
 import sqlite3
 from pathlib import Path
 
+from starter.catalog_meta import TABLE as META_TABLE
+from starter.catalog_meta import create_table as create_meta_table
+from starter.catalog_meta import lookup as meta_lookup
+from starter.catalog_meta import signals as meta_signals
 from starter.contracts import Candidate, Context, RankingResult, SessionState
+from starter.ranking import rank as constraint_rank
 from starter.retrieval import POOL_LIMIT, retrieve
 from starter.state import update_state
 from starter.text import flatten_text as _text
@@ -160,13 +165,26 @@ class Agent:
             "parent_asin UNINDEXED, title, categories, features, details, store, description, "
             "tokenize='unicode61 remove_diacritics 2')"
         )
+        create_meta_table(self.connection)
         batch: list[tuple[str, str, str, str, str, str, str]] = []
+        meta_batch: list[tuple] = []
+
+        def flush() -> None:
+            cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+            cursor.executemany(
+                f"INSERT OR REPLACE INTO {META_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
+                meta_batch,
+            )
+            batch.clear()
+            meta_batch.clear()
+
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
+                parent_asin = str(product["parent_asin"])
                 batch.append(
                     (
-                        str(product["parent_asin"]),
+                        parent_asin,
                         _text(product.get("title")),
                         _text(product.get("categories")),
                         _text(product.get("features")),
@@ -175,11 +193,11 @@ class Agent:
                         _text(product.get("description")),
                     )
                 )
+                meta_batch.append((parent_asin, *meta_signals(product)))
                 if len(batch) >= 1000:
-                    cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
-                    batch.clear()
+                    flush()
         if batch:
-            cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+            flush()
         self.connection.commit()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
@@ -206,13 +224,8 @@ class Agent:
         """One turn end to end.
 
         State manager (single writer) -> Context -> multi-route retrieval
-        UNION (Phase 5) -> ranking -> payload. Retrieval and ranking do not
-        touch state.
-
-        Phase 5 builds a multi-route candidate pool (BM25 + category +
-        attribute); ``_rank`` still orders by BM25 only, so the top-10
-        response is unchanged from the baseline. Constraint-aware ranking
-        that makes the pool count is Phase 6.
+        UNION (Phase 5) -> constraint-aware ranking (Phase 6) -> payload.
+        Retrieval and ranking never touch state.
         """
         if session_id not in self._states:
             raise RuntimeError("reset must be called before respond")
@@ -220,5 +233,6 @@ class Agent:
         update_state(state, user_message, turn)
         context = _build_context(session_id, user_message, turn, state)
         pool = retrieve(self.connection, context, POOL_LIMIT)
-        result = _rank(pool, top_k)
+        metadata = meta_lookup(self.connection, [c.parent_asin for c in pool])
+        result = constraint_rank(pool, context, metadata, _effective_k(top_k))
         return _to_response(result, top_k)

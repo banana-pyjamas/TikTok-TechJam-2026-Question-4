@@ -177,7 +177,13 @@ def fuse(
         key=lambda asin: (-fused[asin], best_rank[asin], best_route[asin], asin),
     )[:limit]
     return [
-        Candidate(parent_asin=asin, route_scores=dict(route_scores[asin]))
+        Candidate(
+            parent_asin=asin,
+            route_scores=dict(route_scores[asin]),
+            # The fused score is the rank-derived, pool-independent base that
+            # constraint ranking (Phase 6) builds on.
+            metadata={"fusion_score": fused[asin]},
+        )
         for asin in ordered
     ]
 

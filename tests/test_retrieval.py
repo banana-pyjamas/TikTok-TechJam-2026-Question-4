@@ -166,7 +166,7 @@ class MissingMetadataSafetyTest(_CatalogFixture):
 
 
 class RespondPoolIntegrationTest(_CatalogFixture):
-    def test_respond_still_returns_bm25_top10_unchanged(self) -> None:
+    def test_respond_surfaces_the_constraint_matching_product(self) -> None:
         self._agent.reset("s", {"summary": "x"})
         payload = self._agent.respond("s", "black leather waterproof boot", 1, 10)
         self.assertEqual(payload["recommendations"][0]["parent_asin"], "B0BOOT")
