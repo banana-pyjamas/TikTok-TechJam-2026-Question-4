@@ -137,25 +137,40 @@ DEFAULT_ROUTES = ("bm25", "category")
 #
 # 3  THE SIZE OF THE PRIZE, BRACKETED BY MEASUREMENT
 #
-# 162 of 200 targets reach the pool; 38 never do. In retrieval's own metric
-# that is exactly +0.19 candidate recall, and it is the only figure here that
-# is not an inference. Downstream it depends on WHERE a route puts the
-# target, measured by re-running the evaluator with the answer injected into
-# those 38 sessions and no others:
+# Scope first, because 7c52e87 got it wrong (C) and both of its terms moved
+# the same way. A turn only counts if the evaluator would SCORE it: its hit
+# test is `if override_applied and target in ranked`, and for intent_override
+# sessions that flag is False until the override turn, so a target in the
+# pool before then is a pool hit that could never have become a score.
+# Turn-level and override-aware:
 #
-#   injected at the pool FLOOR (fusion_score 0)   TS +0.0000    0/38 convert
-#   injected at the pool HEAD  (best fusion)      TS +0.1848   38/38 convert
+#   target in pool on ANY turn                   162/200
+#   target in pool on a SCORING-ELIGIBLE turn    149/200   <- the honest one
+#   never in pool on an eligible turn             51/200
+#      of which never in the pool at all          38   <- what 7c52e87 counted
+#      of which in the pool ONLY pre-override     13
 #
-# So retrieval's downstream value is somewhere in [+0.0000, +0.1848] TS, and
+# So retrieval loses 51 sessions, not 38, and its own metric says the headroom
+# is +0.2550 candidate recall over eligible turns. That is the only figure
+# here that is not an inference. Downstream it depends on WHERE a route puts
+# the target, measured by re-running the evaluator with the answer injected
+# into those 51 sessions and no others:
+#
+#   injected at the pool FLOOR (fusion_score 0)   TS +0.0000    0/51 convert
+#   injected at the pool HEAD  (best fusion)      TS +0.2419   50/51 convert
+#
+# So retrieval's downstream value is somewhere in [+0.0000, +0.2419] TS, and
 # RANK matters more than presence: getting the target into the pool at the
 # bottom is worth literally nothing through the current ranker. The "+0.025
 # TS ceiling" quoted for this phase in 7c52e87 is neither bound -- it was an
 # extrapolation, and it moved the HitRate term only, while TS = 0.5*HR +
 # 0.3*MRR + 0.2*eff and a recovered hit moves all three. Applied consistently
-# the same extrapolation is +0.0428. It is withdrawn in favour of the bracket.
+# and at the corrected scope it is +0.0624. Withdrawn in favour of the bracket.
 #
-# Meanwhile 120 targets sit IN the pool and still lose: 3.2x the session count
-# of the whole retrieval surface, all of it downstream of this file.
+# Meanwhile 107 targets reach the pool on a turn that COULD have scored and
+# still lose: ~2.1x the session count of the whole retrieval surface, all of
+# it downstream of this file. (7c52e87 published 120 and 3.2x; both terms of
+# that ratio were session-level and override-blind.)
 #
 # 4  RETRACTION: THE VOCABULARY ARGUMENT MEASURED THE SIMULATOR
 #
@@ -185,7 +200,7 @@ DEFAULT_ROUTES = ("bm25", "category")
 # certified interpreter. The bracket in (3) says what to measure about it
 # FIRST -- the rank it assigns the target, not the recall it achieves, since
 # recall alone bought +0.0000. The same encoder question gates Phase 14, and
-# reranking the 120 in-pool losses works on 3.2x the sessions.
+# reranking the 107 in-pool losses works on ~2.1x the sessions.
 # --------------------------------------------------------------------------
 
 

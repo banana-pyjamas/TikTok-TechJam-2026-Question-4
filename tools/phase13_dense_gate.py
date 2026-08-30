@@ -4,14 +4,27 @@ The roadmap gates this phase on measurement: "Only do this if measurements
 justify it." This tool is that measurement, and it is the deliverable when the
 answer is no.
 
-WHAT CHANGED AFTER REVIEW B/D
------------------------------
+WHAT CHANGED AFTER REVIEW B/C/D
+-------------------------------
 The first version of this tool answered the question but overstated its own
-evidence in four places. The corrections are structural, not editorial:
+evidence in five places. The corrections are structural, not editorial:
 
-B1/D-R3  CEILING.  "38 of 200 never retrieved" is a fact about CANDIDATE
-         RECALL: the headroom is +0.19 recall, and that is the number
-         retrieval owns. The old "~+0.025 TS" was a downstream extrapolation
+C        SCOPE.  Both terms of the headline "120 in-pool losses = 3.2x the
+         retrieval surface" were measured session-level, on "was the target
+         in the pool on ANY turn". The evaluator does not score any turn: its
+         hit test is ``if override_applied and target in ranked``, and for
+         intent_override sessions that flag is False until the override turn.
+         A target in the pool before then is a pool hit that could never have
+         become a score. Measuring turn-level and override-aware
+         (``first_scoring_turn``) moves the numbers to 51 sessions retrieval
+         loses and 107 in-pool losses -- ~2.1x, not 3.2x. Section 1 now leads
+         with that scope, states 38 alongside 51 with the difference broken
+         out, and the oracle is scoped to the 51.
+
+B1/D-R3  CEILING.  "N of 200 never retrieved" is a fact about CANDIDATE
+         RECALL -- +0.2550 recall at C's corrected scope above, +0.19 at the
+         looser any-turn one -- and that is the number retrieval owns, at
+         whichever scope is stated. The old "~+0.025 TS" was an extrapolation
          that moved the HitRate term ONLY, while TS = 0.5·HR + 0.3·MRR +
          0.2·eff and a recovered hit moves all three. So the TS consequence
          is now (a) extrapolated across all three terms and labelled as an
@@ -71,10 +84,14 @@ from array import array
 from collections import Counter, defaultdict
 
 from evaluator.local_evaluator import (catalog_index, coarse_category,
-                                       evaluate, load_jsonl)
+                                       evaluate, load_jsonl,
+                                       materialize_hidden_fields)
 from starter import agent as agent_module
 from starter.agent import Agent
+from starter.catalog_meta import lookup as meta_lookup
 from starter.contracts import Candidate, Context
+from starter.ranking import POPULARITY_KEY, RELIABILITY_KEY
+from starter.ranking import rank as constraint_rank
 from starter.retrieval import DEFAULT_ROUTES, POOL_LIMIT, ROUTES, fuse
 from starter.state import is_non_answer
 from starter.text import terms
@@ -264,12 +281,12 @@ def oracle_run(position: str, samples, eligible: set[str],
 
     SCOPE MATTERS, and getting it wrong is how a ceiling gets inflated. The
     oracle fires ONLY on the ``eligible`` samples: the ones whose target the
-    committed route set never retrieves on any turn. Those are the only
-    sessions a better retriever could rescue, and they are exactly the +0.19
-    recall headroom this section is about. Injecting into every session would
-    also hand the ranker a rank-1 target on turns where retrieval had already
-    delivered it on some other turn, which measures a perfect retriever AND a
-    perfect within-session ordering -- a different, much larger claim.
+    committed route set never gets into the pool on a SCORING-ELIGIBLE turn
+    (see ``first_scoring_turn`` -- C's correction). Those are the only
+    sessions a better retriever could rescue. Injecting into every session
+    would also hand the ranker a rank-1 target on turns where retrieval had
+    already delivered it, which measures a perfect retriever AND a perfect
+    within-session ordering -- a different, much larger claim.
 
     ``position`` decides where the injected candidate enters, which is the
     honest uncertainty in the measurement:
@@ -351,6 +368,33 @@ def extrapolated_ceiling(result: dict, missed: int, total: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def first_scoring_turn(sample: dict, products: dict[str, dict]) -> int:
+    """The first turn on which a correct recommendation could become a HIT.
+
+    1 for every scenario except ``intent_override``, where the evaluator holds
+    ``override_applied`` False and its hit test is
+    ``if override_applied and target in ranked`` -- so a target the agent
+    recommends before the override turn is discarded, scored as nothing. The
+    flag flips at the END of the turn where ``turn + 1 == override["turn"]``,
+    which makes ``override["turn"]`` itself the first eligible turn.
+
+    This is the correction C caught. Counting pre-override turns credits
+    retrieval with pool hits that could never have been scored, which
+    understates the number of sessions retrieval actually loses (38 -> 51)
+    and overstates the conversion failure relative to it (3.2x -> 2.1x).
+
+    The override turn is read through the evaluator's own
+    ``materialize_hidden_fields``, not re-derived: it comes from a seeded
+    ``random.Random`` and a second implementation of that seeding would be a
+    silent drift shape (D-N2).
+    """
+    if str(sample.get("scenario_type")) != "intent_override":
+        return 1
+    _, behavior = materialize_hidden_fields(sample, products)
+    override = behavior.get("override") or {}
+    return int(override.get("turn", 3))
+
+
 def _tfidf_query(capture: dict) -> str:
     """The text the lexical vector route scores for one turn.
 
@@ -410,6 +454,8 @@ def main() -> None:
           f"TS {technical_score:.6f}{drift}")
 
     target_of = {session_id: str(sample["ground_truth"]["parent_asin"])
+                 for session_id, sample in zip(agent.order, samples)}
+    sample_of = {session_id: sample
                  for session_id, sample in zip(agent.order, samples)}
     scenario_of = agent.sample_field(samples, "scenario_type")
     by_session = agent.by_session()
@@ -480,17 +526,29 @@ def main() -> None:
     union_with_tfidf = 0
     bad_provenance = 0
 
+    # Turn-level, scoring-eligible bookkeeping (C's correction). Counted here
+    # rather than in a second pass because it needs the same pools.
+    eligible_turns = 0
+    eligible_in_pool = 0
+    eligible_rank_buckets: Counter = Counter()
+
     for session_id, captures in by_session.items():
         target = target_of[session_id]
+        eligible_from = first_scoring_turn(sample_of[session_id], products)
         record = {
             "session_id": session_id,
             "scenario": scenario_of[session_id],
             "best_rank": {arm: None for arm in ARMS},
+            # Committed arm only: does the target reach the pool on a turn the
+            # evaluator would actually score, and where does ranking put it?
+            "in_pool_eligible": False,
+            "best_final_rank_eligible": None,
         }
         for capture in captures:
             context = Context(session_id=session_id, turn=capture["turn"],
                               user_message=capture["message"],
                               state=capture["state"])
+            eligible = capture["turn"] >= eligible_from
             per_route = {
                 "bm25": ROUTES["bm25"](agent.connection, context, POOL_LIMIT),
                 "category": ROUTES["category"](agent.connection, context, POOL_LIMIT),
@@ -512,6 +570,30 @@ def main() -> None:
                     current = record["best_rank"][arm]
                     record["best_rank"][arm] = rank if current is None \
                         else min(current, rank)
+                if arm == COMMITTED_ARM and eligible:
+                    eligible_turns += 1
+                    if target not in asins:
+                        eligible_rank_buckets["not retrieved"] += 1
+                    else:
+                        eligible_in_pool += 1
+                        record["in_pool_eligible"] = True
+                        # The full ranked order, not the top 10 the response
+                        # carries: "it was in the pool" is only half the
+                        # story, and the other half is how far off it landed.
+                        context.derived[RELIABILITY_KEY] = agent._reliability
+                        context.derived[POPULARITY_KEY] = agent._popularity
+                        ranked = constraint_rank(
+                            pool, context,
+                            meta_lookup(agent.connection, asins), len(pool),
+                        ).ranked
+                        position = [c.parent_asin for c in ranked].index(target) + 1
+                        best = record["best_final_rank_eligible"]
+                        record["best_final_rank_eligible"] = position \
+                            if best is None else min(best, position)
+                        eligible_rank_buckets[
+                            "top 10" if position <= 10
+                            else "11-50" if position <= 50
+                            else "51-300"] += 1
                 if arm != UNION_ARM:
                     continue
                 # B5: the union must go through the shipped fusion with
@@ -528,40 +610,88 @@ def main() -> None:
     print(f"   replayed {len(ARMS)} arms over {len(agent.captured)} turns "
           f"in {time.time() - started:.0f}s")
 
-    found = _recalled(records, COMMITTED_ARM, POOL_LIMIT)
-    never = sorted({r["session_id"] for r in records} - found)
     hit_of = {r["sample_id"]: r["hit"] for r in result["sessions"]}
-    sample_of = {session_id: sample
-                 for session_id, sample in zip(agent.order, samples)}
-    hits = sum(1 for s in found if hit_of[sample_of[s]["sample_id"]])
+    hits = sum(1 for r in records if hit_of[sample_of[r["session_id"]]["sample_id"]])
+
+    # Session-level, "target in the pool on ANY turn" -- the definition
+    # tools/phase9_retrieval_evidence.py and section 4 below both use, kept
+    # for comparability across tools.
+    found_any = _recalled(records, COMMITTED_ARM, POOL_LIMIT)
+    never_any = sorted({r["session_id"] for r in records} - found_any)
+
+    # Session-level, SCORING-ELIGIBLE turns only. This is the honest scope for
+    # "sessions retrieval loses", and it is the one the ceiling and the oracle
+    # below are computed on.
+    found_eligible = {r["session_id"] for r in records if r["in_pool_eligible"]}
+    never_eligible = sorted({r["session_id"] for r in records} - found_eligible)
+    pre_override_only = sorted(set(found_any) - found_eligible)
+    in_pool_losses = len(found_eligible) - hits
 
     # -- 1 -------------------------------------------------------------------
     print("\n" + "=" * 76)
     print("1. CEILING -- what perfect retrieval is worth")
     print("=" * 76)
-    print(f"   target reaches the pool          {len(found):>4}/{total}")
-    print(f"   target NEVER retrieved           {len(never):>4}/{total}"
-          "   <- the whole surface a route can attack")
+    print("   SCOPE FIRST, because getting it wrong is what this section was")
+    print("   corrected for (C). A turn only counts if the evaluator would")
+    print("   SCORE it: its hit test is `if override_applied and target in")
+    print("   ranked`, and for intent_override sessions that flag is False")
+    print("   until the override turn. A target sitting in the pool before")
+    print("   then can never become a hit, so counting those turns credits")
+    print("   retrieval with pool hits that were never scoring-eligible.")
+    print(f"\n   turn level, committed route set ({eligible_turns} "
+          "scoring-eligible turns)")
+    def _turn_row(label: str, count: int, note: str = "") -> None:
+        print(f"      {label:<34}{count:>5}"
+              f"{count / max(eligible_turns, 1):>9.1%}{note}")
+
+    _turn_row("target in the pool", eligible_in_pool)
+    for bucket, note in (("top 10", "   <- converts"), ("11-50", ""),
+                         ("51-300", "")):
+        _turn_row(f"   ... and ranked {bucket}",
+                  eligible_rank_buckets[bucket], note)
+    _turn_row("target NOT retrieved", eligible_rank_buckets["not retrieved"])
+
+    print("\n   session level")
+    print(f"      target in pool on ANY turn                  {len(found_any):>4}"
+          f"/{total}")
+    print(f"      target in pool on a SCORING-ELIGIBLE turn   "
+          f"{len(found_eligible):>4}/{total}   <- the honest figure")
+    print(f"      never in pool on an eligible turn           "
+          f"{len(never_eligible):>4}/{total}")
+    print(f"         of which never in the pool at all        {len(never_any):>4}"
+          "   <- the figure 7c52e87 published")
+    print(f"         of which in the pool ONLY pre-override   "
+          f"{len(pre_override_only):>4}")
+    print(f"      in pool on an eligible turn, still LOSE     {in_pool_losses:>4}")
+    print(f"      conversion failure vs retrieval surface     "
+          f"{in_pool_losses / max(len(never_eligible), 1):>4.1f}x"
+          "   <- was published as 3.2x")
+
     print(f"\n   In retrieval's OWN metric the headroom is exact and it is the")
     print(f"   only number here that is not an inference:")
-    print(f"      candidate recall@{POOL_LIMIT}             "
-          f"{len(found) / total:.4f}  ->  1.0000 "
-          f"= +{len(never) / total:.4f} recall")
+    print(f"      candidate recall@{POOL_LIMIT}, eligible turns  "
+          f"{len(found_eligible) / total:.4f}  ->  1.0000 "
+          f"= +{len(never_eligible) / total:.4f} recall")
+    print(f"      (same, counting ANY turn        "
+          f"{len(found_any) / total:.4f}  ->  1.0000 "
+          f"= +{len(never_any) / total:.4f} recall -- the looser scope,")
+    print(f"       kept only because section 4 and phase9 compare route sets "
+          "on it)")
     print(f"\n   Downstream in TS it is an EXTRAPOLATION, and the published")
     print(f"   '+0.025 TS' moved the HitRate term only. TS = 0.5*HR + 0.3*MRR")
     print(f"   + 0.2*eff, and a recovered hit moves all three:")
-    ceiling = extrapolated_ceiling(result, len(never), total)
-    print(f"      in-pool conversion               {hits}/{len(found)} = "
+    ceiling = extrapolated_ceiling(result, len(never_eligible), total)
+    print(f"      in-pool conversion               {hits}/{len(found_eligible)} = "
           f"{ceiling['conversion']:.1%}")
-    print(f"      recovering all {len(never)} at that rate  "
+    print(f"      recovering all {len(never_eligible)} at that rate  "
           f"~{ceiling['recovered']:.1f} hits")
     print(f"      extrapolated TS                  {technical_score:.6f} -> "
           f"{ceiling['technical_score']:.6f}  "
           f"(+{ceiling['technical_score'] - technical_score:.4f})")
     print(f"      of which HitRate term only       "
-          f"+{0.5 * ceiling['recovered'] / total:.4f}   <- the old figure")
+          f"+{0.5 * ceiling['recovered'] / total:.4f}   <- the old figure's shape")
 
-    eligible = {str(sample_of[s]["sample_id"]) for s in never}
+    eligible = {str(sample_of[s]["sample_id"]) for s in never_eligible}
     print(f"\n   And MEASURED, by giving retrieval the answer on exactly those")
     print(f"   {len(eligible)} sessions and no others. Two injection positions "
           "bracket what")
@@ -590,11 +720,15 @@ def main() -> None:
     high = bounds["head"]["recommended_technical_score"] - technical_score
     print(f"\n   PERFECT retrieval is worth [{low:+.4f}, {high:+.4f}] TS, "
           "measured.")
-    print(f"   Meanwhile {len(found) - hits} targets are IN the pool and still "
-          f"lose. That\n   conversion failure is "
-          f"{(len(found) - hits) / max(len(never), 1):.1f}x the size of the "
-          "entire retrieval surface,\n   and every point of it is downstream "
-          "of retrieval.")
+    print(f"   Meanwhile {in_pool_losses} targets reach the pool on a turn that "
+          f"COULD have\n   scored and still lose. That conversion failure is "
+          f"{in_pool_losses / max(len(never_eligible), 1):.1f}x the retrieval\n"
+          "   surface, and every point of it is downstream of retrieval. The "
+          "ratio is\n   smaller than the 3.2x published in 7c52e87 because "
+          "both of its terms were\n   wrong in the same direction: that "
+          "figure divided a session-level 120 by a\n   session-level 38, and "
+          "the eligible-turn scope moves them to "
+          f"{in_pool_losses} and {len(never_eligible)}.")
 
     # -- 2 -------------------------------------------------------------------
     print("\n" + "=" * 76)
@@ -637,7 +771,7 @@ def main() -> None:
     print(f"\n   {'target text counted':36}{'group':10}{'0':>5}{'1-2':>6}"
           f"{'3-4':>6}{'5+':>5}{'  share with 0':>16}")
     for label, _ in variants:
-        for group_name, group in (("missed", never), ("found", sorted(found))):
+        for group_name, group in (("missed", never_any), ("found", sorted(found_any))):
             buckets: Counter = Counter()
             for session_id in group:
                 shared = len(said_of[session_id] & target_terms[session_id][label])
@@ -649,13 +783,13 @@ def main() -> None:
                   f"{buckets[2]:>6}{buckets[3]:>5}{zero:>16.1%}")
 
     inside = sum(
-        1 for session_id in never
+        1 for session_id in never_any
         if (said_of[session_id] & target_terms[session_id]["full text (title+cats+feats+desc)"])
         and (said_of[session_id]
              & target_terms[session_id]["full text (title+cats+feats+desc)"])
         <= set(terms(opening_of[session_id])))
     print(f"\n   missed sessions whose ENTIRE overlap sits inside the "
-          f"generated opening  {inside}/{len(never)}")
+          f"generated opening  {inside}/{len(never_any)}")
     print("\n   READ THIS CORRECTLY. Under the full-text definition the 'missed'")
     print("   and 'found' rows are the same distribution, so that metric has no")
     print("   discriminative power -- it measures the simulator. With the copied")
@@ -677,7 +811,7 @@ def main() -> None:
           f"{'filled slots':>22}")
     print(f"   {'':16}{'':5}{'median':>10}{'mean':>8}{'P90':>8}"
           f"{'median':>10}{'mean':>12}{'median':>10}{'mean':>12}")
-    for label, group in (("target found", sorted(found)), ("target missed", never)):
+    for label, group in (("target found", sorted(found_any)), ("target missed", never_any)):
         tokens = percentiles([len(said_of[s]) for s in group])
         turns = percentiles([informative_of[s] for s in group])
         slots = percentiles([slots_of[s] for s in group])
@@ -685,7 +819,7 @@ def main() -> None:
               f"{tokens.mean:>8.1f}{tokens.p90:>8.0f}"
               f"{turns.median:>10.0f}{turns.mean:>12.2f}"
               f"{slots.median:>10.0f}{slots.mean:>12.2f}")
-    missed_scenarios = Counter(scenario_of[s] for s in never)
+    missed_scenarios = Counter(scenario_of[s] for s in never_any)
     all_scenarios = Counter(scenario_of[s] for s in by_session)
     print("\n   miss rate by scenario:")
     for scenario in sorted(all_scenarios):
