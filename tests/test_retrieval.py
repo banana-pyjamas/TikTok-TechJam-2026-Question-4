@@ -173,5 +173,134 @@ class RespondPoolIntegrationTest(_CatalogFixture):
         self.assertLessEqual(len(payload["recommendations"]), 10)
 
 
+# --------------------------------------------------------------------------
+# B Phase 5 review: the union must remain a real union when BM25 alone can
+# fill the whole pool budget.
+# --------------------------------------------------------------------------
+
+_SATURATED_ROWS = (
+    # 40 products that all match the BM25 query "widget" -- enough to fill a
+    # pool budget of 20 on their own.
+    [
+        {"parent_asin": f"B0W{index:02d}", "title": f"widget number {index}",
+         "categories": ["Clothing", "Widgets"], "features": ["widget"],
+         "details": {}, "store": "Ex", "description": ["a widget"]}
+        for index in range(40)
+    ]
+    # findable only by the category route (in category, never says "widget")
+    + [{"parent_asin": "B0CATONLY", "title": "plain moccasin",
+        "categories": ["Clothing", "Boots"], "features": [], "details": {},
+        "store": "Ex", "description": []}]
+    # findable only by the attribute route (has the material, wrong category)
+    + [{"parent_asin": "B0ATTRONLY", "title": "cashmere pouch",
+        "categories": ["Clothing", "Pouches"], "features": ["cashmere"],
+        "details": {}, "store": "Ex", "description": []}]
+)
+
+
+class UnionBudgetTest(unittest.TestCase):
+    """CP 5.2/5.4 blocker regression: BM25 saturating the budget must not
+    starve the auxiliary routes out of the FINAL pool."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        path = Path(cls._tmp.name) / "catalog.jsonl"
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in _SATURATED_ROWS), encoding="utf-8"
+        )
+        cls._agent = Agent(path)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def _ctx(self) -> Context:
+        return _ctx("widget", category=["boots"], material=["cashmere"])
+
+    def test_bm25_alone_saturates_the_pool_budget(self) -> None:
+        rows = bm25_route(self._agent.connection, self._ctx(), 20)
+        self.assertGreaterEqual(len(rows), 20, "precondition: BM25 fills the budget")
+        self.assertNotIn("B0CATONLY", {a for a, _ in rows})
+        self.assertNotIn("B0ATTRONLY", {a for a, _ in rows})
+
+    def test_auxiliary_unique_candidates_survive_the_final_cap(self) -> None:
+        pool = [c.parent_asin for c in retrieve(self._agent.connection, self._ctx(), 20)]
+        self.assertEqual(len(pool), 20)
+        self.assertIn("B0CATONLY", pool, "category-only candidate starved out of the pool")
+        self.assertIn("B0ATTRONLY", pool, "attribute-only candidate starved out of the pool")
+
+    def test_route_provenance_is_exact_for_auxiliary_uniques(self) -> None:
+        pool = retrieve(self._agent.connection, self._ctx(), 20)
+        by_asin = {c.parent_asin: c for c in pool}
+        self.assertEqual(set(by_asin["B0CATONLY"].route_sources), {"category"})
+        self.assertEqual(set(by_asin["B0ATTRONLY"].route_sources), {"attribute"})
+
+    def test_pool_is_deduplicated_and_capped(self) -> None:
+        pool = [c.parent_asin for c in retrieve(self._agent.connection, self._ctx(), 20)]
+        self.assertEqual(len(pool), len(set(pool)))
+        self.assertLessEqual(len(pool), 20)
+
+
+_OVERRIDE_ROWS = [
+    {"parent_asin": "B0LEATHER", "title": "leather pouch", "categories": ["Clothing", "Pouches"],
+     "features": ["leather"], "details": {}, "store": "Ex", "description": []},
+    {"parent_asin": "B0DENIM", "title": "denim pouch", "categories": ["Clothing", "Pouches"],
+     "features": ["denim"], "details": {}, "store": "Ex", "description": []},
+    {"parent_asin": "B0BLACKDENIM", "title": "black denim jacket", "categories": ["Clothing", "Jackets"],
+     "features": ["denim"], "details": {}, "store": "Ex", "description": []},
+    {"parent_asin": "B0BLACKLEATHER", "title": "black leather jacket", "categories": ["Clothing", "Jackets"],
+     "features": ["leather"], "details": {}, "store": "Ex", "description": []},
+]
+
+
+class OverrideQueryTransitionTest(unittest.TestCase):
+    """B item 10 / D item 1: after 'black leather jacket' -> 'actually denim'
+    retrieval must use only the new active state."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        path = Path(cls._tmp.name) / "catalog.jsonl"
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in _OVERRIDE_ROWS), encoding="utf-8"
+        )
+        cls._agent = Agent(path)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def _after_override(self) -> Context:
+        state = SessionState(session_id="o")
+        update_state(state, "black leather jacket", 1)
+        update_state(state, "actually denim", 2)
+        return Context(session_id="o", turn=2, user_message="actually denim", state=state)
+
+    def test_active_state_after_override(self) -> None:
+        ctx = self._after_override()
+        self.assertEqual(ctx.state.slots["color"]["values"], ["black"])
+        self.assertEqual(ctx.state.slots["category"]["values"], ["jacket"])
+        self.assertEqual(ctx.state.slots["material"]["values"], ["denim"])
+
+    def test_attribute_route_drops_the_superseded_material(self) -> None:
+        ctx = self._after_override()
+        found = {a for a, _ in attribute_route(self._agent.connection, ctx, 50)}
+        self.assertIn("B0DENIM", found, "denim is an active constraint")
+        self.assertNotIn("B0LEATHER", found, "leather must not drive retrieval after override")
+
+    def test_category_route_still_uses_the_preserved_category(self) -> None:
+        ctx = self._after_override()
+        found = {a for a, _ in category_route(self._agent.connection, ctx, 50)}
+        self.assertEqual(found, {"B0BLACKDENIM", "B0BLACKLEATHER"})
+
+    def test_pool_contains_the_new_intent(self) -> None:
+        ctx = self._after_override()
+        pool = [c.parent_asin for c in retrieve(self._agent.connection, ctx, 50)]
+        self.assertIn("B0BLACKDENIM", pool)
+        self.assertIn("B0DENIM", pool)
+        self.assertNotIn("B0LEATHER", pool, "leather-only product must not be retrieved")
+
+
 if __name__ == "__main__":
     unittest.main()

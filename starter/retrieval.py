@@ -7,12 +7,16 @@ intersection -- principle F):
   category   BM25 on the accumulated query, restricted to the category slot
   attribute  products mentioning any color / material / brand / size slot value
 
-Pool order: BM25 results in BM25 order, then the candidates that only the
-category route found, then the attribute-only ones. BM25 stays authoritative
-for the head of the pool, so pool Recall@K can never drop below BM25's for
-K within the BM25 result size -- the extra routes only widen reach in the
-tail. Turning the extra routes into rank movement in the top-K needs
-constraint-aware scoring, which is Phase 6.
+Pool order: Reciprocal Rank Fusion over the routes. Each route votes with
+``1 / (RRF_K + rank)``, so a candidate near the head of ANY route outranks
+one buried deep in another, and a candidate found by several routes rises
+above one found by a single route. This is what lets the category and
+attribute routes contribute unique candidates to the FINAL pool rather than
+being truncated behind a full BM25 head.
+
+Fusion is rank-based, never score-based: no candidate-pool min-max
+normalization (principle G). Ordering is fully deterministic -- ties break
+on best per-route rank, then ``parent_asin``.
 
 Missing catalog metadata reduces how many routes surface a product but never
 eliminates it -- one route is enough, and no route hard-filters on a field
@@ -37,7 +41,11 @@ from starter.text import terms
 # description. Same as the Phase 1 baseline.
 _BM25_RANK = "bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)"
 _ATTRIBUTE_SLOTS = ("color", "material", "brand", "size")
+# Deterministic tie-break order when two candidates fuse to the same score.
 _ROUTE_ORDER = ("bm25", "category", "attribute")
+# Standard RRF damping. Rank 1 of any route (1/61) outranks rank 61+ of
+# another, which is what gives the auxiliary routes real access to the pool.
+_RRF_K = 60
 
 POOL_LIMIT = 300
 
@@ -76,11 +84,14 @@ def bm25_route(connection: sqlite3.Connection, context: Context, limit: int) -> 
 def category_route(connection: sqlite3.Connection, context: Context, limit: int) -> list[tuple[str, float]]:
     """BM25 on the accumulated query, restricted to the category slot.
 
-    The category-column filter is a route-scoped restriction, not a catalog
-    filter: an out-of-category product can still reach the pool via the
-    BM25 route. The category words are part of the ranked query, so every
-    in-category product matches (nothing is dropped for lacking an
-    attribute term -- CP 5.8).
+    Membership is decided by the ``categories:`` filter alone; the message
+    and attribute terms only influence BM25 ORDER. The category prefix is
+    also OR-ed into the ranked query, so a product in the category that
+    shares no other term still matches -- nothing is dropped for lacking an
+    attribute or a description (CP 5.8).
+
+    The filter is route-scoped, not a catalog filter: an out-of-category
+    product still reaches the pool through the BM25 route (principle E).
     """
     stems = sorted({
         _stem(token)
@@ -96,10 +107,12 @@ def category_route(connection: sqlite3.Connection, context: Context, limit: int)
         for value in _slot_values(context, name)
         for token in terms(value)
     ]
-    query = _fts_or(terms(context.user_message) + attribute_tokens + stems)
+    # ``stems`` come from ``terms()``: lowercase [a-z0-9]+ only, safe to inline.
+    prefixes = " OR ".join(f"{stem}*" for stem in stems)
+    ranked = _fts_or(terms(context.user_message) + attribute_tokens)
+    query = f"{ranked} OR {prefixes}" if ranked else prefixes
     category_filter = " OR ".join(f"categories:{stem}*" for stem in stems)
-    expression = f"({query}) AND ({category_filter})" if query else f"({category_filter})"
-    return _run(connection, expression, limit)
+    return _run(connection, f"({query}) AND ({category_filter})", limit)
 
 
 def attribute_route(connection: sqlite3.Connection, context: Context, limit: int) -> list[tuple[str, float]]:
@@ -119,31 +132,63 @@ ROUTES: dict[str, object] = {
 }
 
 
+def run_routes(
+    connection: sqlite3.Connection, context: Context, limit: int = POOL_LIMIT
+) -> dict[str, list[tuple[str, float]]]:
+    """Every route's raw result list, keyed by route name.
+
+    Exposed so reviewers can measure per-route target presence and candidate
+    loss stage without re-implementing the routes.
+    """
+    return {
+        name: route(connection, context, limit)  # type: ignore[operator]
+        for name, route in ROUTES.items()
+    }
+
+
+def fuse(
+    per_route: dict[str, list[tuple[str, float]]], limit: int = POOL_LIMIT
+) -> list[Candidate]:
+    """Reciprocal Rank Fusion over per-route results -> the candidate pool.
+
+    Every route contributes ``1 / (_RRF_K + rank)`` per candidate, so a
+    candidate ranked highly by ANY route can enter the final pool even when
+    another route alone would fill the whole budget. Multi-route candidates
+    accumulate votes and rise.
+
+    Deterministic: ties break on best per-route rank, then route priority,
+    then ``parent_asin``. Deduplicated by construction (fusion is keyed by
+    ``parent_asin``). Each ``Candidate`` keeps its RAW per-route scores.
+    """
+    fused: dict[str, float] = defaultdict(float)
+    route_scores: dict[str, dict[str, float]] = defaultdict(dict)
+    best_rank: dict[str, int] = {}
+    best_route: dict[str, int] = {}
+
+    for priority, name in enumerate(_ROUTE_ORDER):
+        for rank, (parent_asin, score) in enumerate(per_route.get(name, [])):
+            fused[parent_asin] += 1.0 / (_RRF_K + rank + 1)
+            route_scores[parent_asin][name] = score
+            best_rank[parent_asin] = min(best_rank.get(parent_asin, rank), rank)
+            best_route.setdefault(parent_asin, priority)
+
+    ordered = sorted(
+        fused,
+        key=lambda asin: (-fused[asin], best_rank[asin], best_route[asin], asin),
+    )[:limit]
+    return [
+        Candidate(parent_asin=asin, route_scores=dict(route_scores[asin]))
+        for asin in ordered
+    ]
+
+
 def retrieve(
     connection: sqlite3.Connection, context: Context, limit: int = POOL_LIMIT
 ) -> list[Candidate]:
-    """UNION of every route.
+    """UNION of every route, Reciprocal-Rank-Fusion ordered.
 
-    Returns up to ``limit`` ``Candidate`` objects in pool order (BM25 head,
-    then category-only, then attribute-only). Each carries its raw per-route
-    scores in ``route_scores`` (so ``route_sources`` names every route that
-    surfaced it).
+    Returns up to ``limit`` ``Candidate`` objects; each carries its raw
+    per-route scores in ``route_scores``, so ``route_sources`` names every
+    route that surfaced it.
     """
-    per_route: dict[str, list[tuple[str, float]]] = {
-        name: route(connection, context, limit) for name, route in ROUTES.items()  # type: ignore[operator]
-    }
-
-    route_scores: dict[str, dict[str, float]] = defaultdict(dict)
-    order: list[str] = []
-    seen: set[str] = set()
-    for name in _ROUTE_ORDER:
-        for parent_asin, score in per_route.get(name, []):
-            route_scores[parent_asin][name] = score
-            if parent_asin not in seen:
-                seen.add(parent_asin)
-                order.append(parent_asin)
-
-    return [
-        Candidate(parent_asin=parent_asin, route_scores=dict(route_scores[parent_asin]))
-        for parent_asin in order[:limit]
-    ]
+    return fuse(run_routes(connection, context, limit), limit)
