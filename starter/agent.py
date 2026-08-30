@@ -8,9 +8,10 @@ from pathlib import Path
 from starter.catalog_meta import TABLE as META_TABLE
 from starter.catalog_meta import create_table as create_meta_table
 from starter.catalog_meta import lookup as meta_lookup
+from starter.catalog_meta import popularity_scale
 from starter.catalog_meta import signals as meta_signals
 from starter.contracts import Candidate, Context, RankingResult, SessionState
-from starter.ranking import RELIABILITY_KEY
+from starter.ranking import POPULARITY_KEY, RELIABILITY_KEY
 from starter.ranking import rank as constraint_rank
 from starter.reliability import match_reliability, slot_coverage
 from starter.retrieval import (DEFAULT_ROUTES, POOL_LIMIT, bm25_route,
@@ -214,6 +215,9 @@ class Agent:
         # The result is catalog-global and READ-ONLY: it is handed to every
         # Context by reference, never copied per turn and never mutated.
         self._reliability = match_reliability(slot_coverage(self.connection))
+        # Phase 12 (CP 12.1/12.2). Catalog-wide popularity normalisation, on
+        # the same terms: computed once, read-only, shared by reference.
+        self._popularity = popularity_scale(self.connection)
 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
@@ -298,6 +302,7 @@ class Agent:
         # CP 11.2 -- per-slot Match Reliability reaches ranking through the
         # generic `derived` bag, not a new frozen field (contracts rule).
         context.derived[RELIABILITY_KEY] = self._reliability
+        context.derived[POPULARITY_KEY] = self._popularity
 
         # No build_strategy() call here on purpose. The strategy does not gate
         # retrieval -- mode-adaptive route selection measured worth +0.000298,

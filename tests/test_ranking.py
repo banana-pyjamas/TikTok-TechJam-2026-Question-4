@@ -37,6 +37,9 @@ FROZEN_DIAGNOSTIC_KEYS = {
     # to explain not just WHICH constraints a candidate matched but how much
     # each one was worth, since that is what decides the score.
     "constraint_weights",
+    # Phase 12 (CP 12.1). docs/file_ownership.md has required a "popularity
+    # prior" in the diagnostics since CP 0.1; adding it deliberately.
+    "popularity_score",
 }
 
 _EMPTY_META = {

@@ -65,6 +65,7 @@ from __future__ import annotations
 from typing import Any
 
 from starter.contracts import Candidate, Context, RankingResult
+from starter.popularity import popularity_score
 from starter.profile import extract_evidence, profile_match_ratio
 from starter.reliability import reliability_of
 
@@ -136,6 +137,9 @@ DIAGNOSTIC_KEYS = frozenset({
     "violated",
     "route_sources",
     "constraint_weights",
+    # Phase 12. docs/file_ownership.md has required a "popularity prior" in
+    # the diagnostics since CP 0.1; this is it.
+    "popularity_score",
 })
 
 
@@ -192,6 +196,58 @@ DIAGNOSTIC_KEYS = frozenset({
 # and one flag from live. EC itself is computed and stored regardless: it is
 # state, not scoring, and Phase 15 wants it.
 USE_CONFIDENCE_WEIGHTING = False
+
+# Ablation flag for the popularity prior (Phase 12).
+#
+# ON, and it is the largest established gain in the project:
+#
+#   OFF   HR 0.1600   MRR 0.080887   TS 0.134566
+#   ON    HR 0.2100   MRR 0.126192   TS 0.182258     +0.047692
+#   McNemar +10, 10/0 discordant, p = 0.0020  -- established
+#
+# Every scenario improves. For comparison the entire Phase 0-6 stack is worth
+# +0.0279 over the baseline, so this one term is worth more than everything
+# before it combined.
+#
+# WHY IT IS WORTH SO MUCH, WHICH IS NOT THE FLATTERING ANSWER
+#
+# Not because popularity is a deep signal about what shoppers want. Because
+# the public set's ground-truth targets are drawn almost entirely from the
+# most-reviewed products in the catalog:
+#
+#   catalog  rating_number  median     12
+#   targets  rating_number  median  7,078   -- the 99.5th catalog percentile
+#   targets below the catalog median: 4 of 200 (2%), where unbiased is 50%
+#
+# So on THIS benchmark a bestseller list is close to an oracle. The private
+# 800 is built the same way, so the gain should transfer -- but it is a fact
+# about how the evaluation was sampled, not evidence that ranking by review
+# count serves shoppers. Anyone quoting this number should quote that with it.
+#
+# THE WEIGHT IS DELIBERATELY LEFT ON THE TABLE
+#
+# W_POPULARITY is 0.008, an order of magnitude below W_MATCH, exactly as
+# CP 12.4 requires. Raising it pays enormously on this benchmark:
+#
+#   W_POPULARITY   0.008 -> TS 0.182   (shipped)
+#                  0.02  -> TS 0.275
+#                  0.05  -> TS 0.407
+#                  0.10  -> TS 0.500
+#
+# At 0.10 popularity equals W_MATCH and a bestseller can cancel a satisfied
+# constraint outright -- which is precisely the collapse CP 12.4 forbids. The
+# roadmap set that constraint before any of these numbers existed, and it is
+# not the kind of constraint to relax because the artifact it protects against
+# happens to pay. Anything above ~0.01 stops being a prior and becomes the
+# ranker. Left at 0.008; the sweep is recorded here so the trade is visible
+# rather than silently taken or silently forgone.
+#
+# OFF: the popularity term is not computed and the score is exactly the
+# pre-Phase-12 score.
+USE_POPULARITY = True
+
+# Where ``rank`` reads the catalog popularity scale out of ``Context.derived``.
+POPULARITY_KEY = "popularity_scale"
 
 # Where ``rank`` reads per-slot Match Reliability out of ``Context.derived``.
 # A generic container by the contracts rule: a new signal adds a key, never a
@@ -339,6 +395,8 @@ def score_candidate(
     bounds: dict[str, Any] | None = None,
     profile_evidence: dict[str, Any] | None = None,
     weights: dict[str, float] | None = None,
+    popularity: dict[str, float] | None = None,
+    total_evidence: float = 0.0,
 ) -> dict[str, Any]:
     """Constraint verdicts plus the score components for one candidate.
 
@@ -389,12 +447,18 @@ def score_candidate(
             profile_evidence, meta.get("traits") or set()
         )
 
+    # Phase 12. Bounded by W_POPULARITY and decayed by the evidence already
+    # gathered, so it can only separate candidates the constraints leave tied.
+    popularity_term = popularity_score(meta, popularity, total_evidence)
+
     return {
         "base_score": base,
         "attribute_score": attribute_score,
         "violation_penalty": violation_penalty,
         "profile_score": profile_score,
-        "final_score": base + attribute_score - violation_penalty + profile_score,
+        "popularity_score": popularity_term,
+        "final_score": (base + attribute_score - violation_penalty
+                        + profile_score + popularity_term),
         "matched": matched,
         "violated": violated,
         "route_sources": list(candidate.route_sources),
@@ -427,6 +491,17 @@ def rank(
         extract_evidence(context.state.user_profile) if USE_PROFILE else None
     )
     weights = constraint_weights(context, constraints) if USE_CONFIDENCE_WEIGHTING else None
+    popularity = None
+    total_evidence = 0.0
+    if USE_POPULARITY:
+        if isinstance(context.derived, dict):
+            popularity = context.derived.get(POPULARITY_KEY)
+        # CP 12.3 -- how much the shopper has actually committed to so far.
+        # Summed Evidence Confidence, so a hedged constraint displaces less of
+        # the prior than an insisted-upon one. Read straight from state, so
+        # this works whether or not USE_CONFIDENCE_WEIGHTING is on: EC is
+        # state, not scoring, and the two flags stay independent.
+        total_evidence = sum(slot_confidence(context, slot) for slot in constraints)
     scored: list[tuple[Candidate, dict[str, Any]]] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -435,7 +510,7 @@ def rank(
         seen.add(candidate.parent_asin)
         detail = score_candidate(
             candidate, constraints, metadata.get(candidate.parent_asin, {}),
-            bounds, profile_evidence, weights,
+            bounds, profile_evidence, weights, popularity, total_evidence,
         )
         scored.append((candidate, detail))
 

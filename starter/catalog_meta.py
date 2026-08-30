@@ -19,6 +19,7 @@ import re
 import sqlite3
 from typing import Any
 
+from starter.popularity import DEFAULT_SCALE, popularity_feature
 from starter.profile import ALL_TRAIT_TERMS
 from starter.state import _COLOR_ALIASES, _COLORS, _MATERIALS
 from starter.vocabulary import product_terms
@@ -37,15 +38,16 @@ def create_table(connection: sqlite3.Connection) -> None:
         f"CREATE TABLE IF NOT EXISTS {TABLE} ("
         "parent_asin TEXT PRIMARY KEY, colors TEXT, materials TEXT, "
         "cats TEXT, store TEXT, sizes TEXT, price REAL, traits TEXT, "
-        "vocab TEXT)"
+        "vocab TEXT, popularity REAL)"
     )
 
 
 def signals(
     product: dict,
-) -> tuple[str, str, str, str, str, float | None, str, str]:
+) -> tuple[str, str, str, str, str, float | None, str, str, float | None]:
     """The row this product contributes: colours, materials, category tokens,
-    store, sizes, price, profile-trait vocabulary, candidate vocabulary.
+    store, sizes, price, profile-trait vocabulary, candidate vocabulary,
+    popularity.
 
     New signals are APPENDED. Existing positions are part of how callers read
     this tuple (``tests/test_ranking.py`` indexes ``[2]`` for category tokens),
@@ -83,7 +85,43 @@ def signals(
         # Phase 10. Order-sensitive (title first), so unlike the sets above it
         # is stored as produced rather than sorted.
         " ".join(product_terms(product)),
+        # Phase 12 (CP 12.1). log1p of the review count, precomputed once here
+        # rather than per candidate per turn. NULL when the catalog gives no
+        # usable count -- absence is a missing signal, never a zero (CP 12.2).
+        popularity_feature(product.get("rating_number")),
     )
+
+
+def popularity_scale(connection: sqlite3.Connection) -> dict[str, float]:
+    """Catalog-wide popularity normalisation, computed once per agent.
+
+    Returns ``{"scale": ..., "missing": ...}``:
+
+      scale    the largest ``log1p`` review count in the catalog, so the
+               normalised feature lands in ``[0, 1]`` with no hand-set
+               reference;
+      missing  the MEDIAN, which is what a product with no usable count scores
+               (CP 12.2) -- absent data is typical, never worst.
+
+    An empty or absent side table yields ``{}``, which consumers read as "no
+    statistics" and therefore "no popularity signal": the prior switches
+    itself off rather than inventing a scale.
+
+    Lives here rather than in ``popularity`` because ``popularity`` must not
+    import this module -- see that module's docstring.
+    """
+    try:
+        rows = connection.execute(
+            f"SELECT popularity FROM {TABLE} WHERE popularity IS NOT NULL "
+            f"ORDER BY popularity"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    values = [float(row[0]) for row in rows]
+    if not values:
+        return {}
+    return {"scale": values[-1] or DEFAULT_SCALE,
+            "missing": values[len(values) // 2]}
 
 
 def lookup(
@@ -98,8 +136,8 @@ def lookup(
         return {}
     placeholders = ",".join("?" * len(parent_asins))
     rows = connection.execute(
-        f"SELECT parent_asin, colors, materials, cats, store, sizes, price, traits "
-        f"FROM {TABLE} WHERE parent_asin IN ({placeholders})",
+        f"SELECT parent_asin, colors, materials, cats, store, sizes, price, "
+        f"traits, popularity FROM {TABLE} WHERE parent_asin IN ({placeholders})",
         parent_asins,
     ).fetchall()
     return {
@@ -111,6 +149,7 @@ def lookup(
             "sizes": set(row[5].split()) if row[5] else set(),
             "price": row[6],
             "traits": set(row[7].split()) if row[7] else set(),
+            "popularity": row[8],
         }
         for row in rows
     }

@@ -41,12 +41,18 @@ DATASET = "data/public_set.jsonl"
 # one?", which hides the case where an earlier layer is a net cost that a
 # later one merely compensates for. Run 3b isolates that.
 RUNS = [
-    ("Run 0   baseline", False, False, False),
-    ("Run 1   +state", True, False, False),
-    ("Run 2   +retrieval", True, True, False),
-    ("Run 3   +ranking", True, True, True),
-    ("Run 3b  ranking, BM25 pool", True, False, True),
+    # label, USE_STATE, USE_MULTI_ROUTE, USE_CONSTRAINT_RANKING, USE_POPULARITY
+    ("Run 0   baseline", False, False, False, False),
+    ("Run 1   +state", True, False, False, False),
+    ("Run 2   +retrieval", True, True, False, False),
+    ("Run 3   +ranking", True, True, True, False),
+    ("Run 4   +popularity", True, True, True, True),
+    ("Run 3b  ranking, BM25 pool", True, False, True, False),
 ]
+
+# Run 4 is the stack that SHIPS. Popularity gets its own rung rather than
+# riding with USE_CONSTRAINT_RANKING because it is worth more than every layer
+# before it combined, and folding it into another rung would hide that.
 
 # Every ablation flag in the WHOLE package, so a run pins the entire
 # configuration. Scoped package-wide via ``tools.config_guard`` after D-N2:
@@ -60,6 +66,7 @@ PINNED_FLAGS = {
     ("agent", "USE_CONSTRAINT_RANKING"),
     ("ranking", "USE_PROFILE"),
     ("ranking", "USE_CONFIDENCE_WEIGHTING"),
+    ("ranking", "USE_POPULARITY"),
 }
 
 
@@ -75,10 +82,11 @@ def main() -> None:
     print(f"ready in {time.time() - started:.1f}s\n")
 
     results = []
-    for label, use_state, use_routes, use_ranking in RUNS:
+    for label, use_state, use_routes, use_ranking, use_popularity in RUNS:
         config_guard.set_flag("agent", "USE_STATE", use_state)
         config_guard.set_flag("agent", "USE_MULTI_ROUTE", use_routes)
         config_guard.set_flag("agent", "USE_CONSTRAINT_RANKING", use_ranking)
+        config_guard.set_flag("ranking", "USE_POPULARITY", use_popularity)
         config_guard.set_flag("ranking", "USE_PROFILE", False)
         # Pinned to its COMMITTED value, not to the rung. This ladder measures
         # the stack that ships, and Phase 11 weighting ships OFF (measured
@@ -102,7 +110,7 @@ def main() -> None:
     print(f"\n{'run':28}{'HR@10':>8}{'MRR':>10}{'MTTC':>8}{'MTTC|hit':>10}"
           f"{'TS':>10}{'d prev':>9}{'d base':>9}")
     previous = base
-    for result in results[:4]:  # the linear ladder
+    for result in results[:5]:  # the linear ladder
         score = result["recommended_technical_score"]
         conditional = mttc_given_hit(result)
         print(f"{result['_label']:28}{result['hit_rate_at_10']:>8.4f}"
@@ -110,7 +118,7 @@ def main() -> None:
               f"{(conditional if conditional is not None else float('nan')):>10.3f}"
               f"{score:>10.6f}{score - previous:>+9.6f}{score - base:>+9.6f}")
         previous = score
-    off_ladder = results[4]
+    off_ladder = results[5]
     score = off_ladder["recommended_technical_score"]
     conditional = mttc_given_hit(off_ladder)
     print(f"{off_ladder['_label']:28}{off_ladder['hit_rate_at_10']:>8.4f}"
@@ -151,12 +159,14 @@ def main() -> None:
     print("\npaired significance (McNemar exact, per-session hit verdicts)")
     print("  the shipped arm is ranking ON -- read that column, not the other")
     pairs = [
-        ("whole stack vs baseline", "Run 0   baseline", "Run 3   +ranking"),
+        ("Phase 0-6 stack vs baseline", "Run 0   baseline", "Run 3   +ranking"),
         ("state alone", "Run 0   baseline", "Run 1   +state"),
         ("multi-route | ranking OFF", "Run 1   +state", "Run 2   +retrieval"),
         ("multi-route | ranking ON  *", "Run 3b  ranking, BM25 pool", "Run 3   +ranking"),
         ("ranking | bm25 pool", "Run 1   +state", "Run 3b  ranking, BM25 pool"),
         ("ranking | union pool  *", "Run 2   +retrieval", "Run 3   +ranking"),
+        ("popularity | full stack  *", "Run 3   +ranking", "Run 4   +popularity"),
+        ("whole shipped stack", "Run 0   baseline", "Run 4   +popularity"),
     ]
     for label, before_label, after_label in pairs:
         test = mcnemar(hits_by_sample(by_label[before_label]),
