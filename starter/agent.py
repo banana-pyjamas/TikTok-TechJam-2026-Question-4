@@ -193,9 +193,26 @@ class Agent:
         self.connection = sqlite3.connect(":memory:")
         self._states: dict[str, SessionState] = {}
         self._build_index()
-        # Phase 11 (CP 11.2). Six aggregate queries over the side table, once
-        # per agent -- never per turn. A property of the frozen catalog, so
-        # there is nothing per-session about it.
+        # Phase 11 (CP 11.2). A property of the frozen catalog, so it is
+        # computed once per agent and never per turn.
+        #
+        # Measured cost (D Phase 11 follow-up), since USE_CONFIDENCE_WEIGHTING
+        # currently ships OFF and this therefore runs for a consumer that is
+        # switched off:
+        #
+        #   init without it   5.680s     7 aggregate queries (1 count + 6 slots)
+        #   init with it      5.766s     0 reliability queries per respond()
+        #   delta            +0.086s     +1.52%
+        #
+        # Negligible, so it is left unconditional rather than gated. That
+        # keeps flipping the flag a one-line change with no other edits, which
+        # is the point of an ablation flag. Worth being explicit about what
+        # OFF means: the scoring path and the response are a no-op, NOT that
+        # no work happens. Gating this behind the flag would trade 86ms for a
+        # second thing to remember when the flag moves.
+        #
+        # The result is catalog-global and READ-ONLY: it is handed to every
+        # Context by reference, never copied per turn and never mutated.
         self._reliability = match_reliability(slot_coverage(self.connection))
 
     def _build_index(self) -> None:

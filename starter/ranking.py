@@ -22,10 +22,26 @@ bury most of the catalog.
 
 UNKNOWN slots DO stay in the ratio denominator, which is the count of active
 constraints. That denominator is identical for every candidate in a turn, so
-it is a monotone rescale: UNKNOWN never changes the relative order of
-candidates, it only scales the attribute term against ``base``. No candidate
-is penalised for what the catalog omits about it, which is what CP 6.4
-requires.
+no candidate is penalised for what the catalog omits about IT -- which is what
+CP 6.4 requires, and is the whole claim.
+
+It is NOT a claim that the ordering is invariant. An earlier version of this
+paragraph said the denominator "is a monotone rescale: UNKNOWN never changes
+the relative order of candidates". That is false, and the B Phase 11 review
+found it: ``base`` is not divided by the denominator, so changing the
+denominator changes the strength of constraint evidence RELATIVE to retrieval
+order, and two candidates can cross. With one active constraint::
+
+    A  base 0.00, MATCH     ->  0.00 + 0.10 * 1/1 = 0.100   A wins
+    B  base 0.06, UNKNOWN   ->  0.06                = 0.060
+
+    add a second, UNKNOWN-for-both constraint:
+    A  ->  0.00 + 0.10 * 1/2 = 0.050                        B wins
+    B  ->  0.06              = 0.060
+
+Reordering is in fact the POINT -- a scoring layer that could not reorder
+would do nothing. What the denominator guarantees is candidate-independence,
+not order invariance, and only the former was ever needed.
 
 The alternative -- dividing by only the slots with a known verdict -- was
 measured and REJECTED. It rewards ignorance: with constraints
@@ -134,26 +150,43 @@ DIAGNOSTIC_KEYS = frozenset({
 # reliability.match_reliability). See ``constraint_weights`` for the three
 # quadrants and ``score_candidate`` for the arithmetic.
 #
-# OFF: measured EXACTLY inert on the public set. Not "small" -- 0 sessions
-# gained, 0 lost, and HR / MRR / MTTC / TS identical to six decimals, so no
-# target's rank moved anywhere in 200 sessions
-# (``python3 -m tools.phase11_confidence``).
+# OFF, and the reason is NOT that the weighting does nothing. It does a great
+# deal; it just does it where the evaluator cannot see.
 #
-# The census in that tool says why, and it is a property of this data rather
-# than of the mechanism: 76% of turns carry at most ONE active constraint, and
-# with one constraint the weight is a uniform scaling of every candidate's
-# attribute term -- a monotone rescale that cannot reorder anything. Only the
-# 24% of turns whose slots have DIFFERENT weights can move a ranking. And the
-# case the phase is chiefly for, CP 11.4 (firmly meant, poorly attested),
-# occurs 4 times in 1762 constraint occurrences: 0.2%.
+# Measured directly by ranking each live turn's pool BOTH ways and diffing the
+# orders (``python3 -m tools.phase11_confidence``):
+#
+#   turns with a candidate-order change      527 / 1729   30.5%
+#   turns with a Top-10 order change           3 / 1729    0.2%
+#   turns where the TARGET's rank moved        0 /  424    0.0%
+#   sessions gained / lost                       0 / 0     p = 1.0000
+#
+# So the aggregates being identical to six decimals is a fact about the top of
+# the list, not about the ranking. Three in a thousand turns reorder the Top-10
+# at all, and across every turn where the target was in the pool it never moved
+# a single position. An earlier version of this comment reported the aggregates
+# as proof that "no target's rank moved anywhere"; the aggregates cannot show
+# that, and it needed the row above to be said honestly (B Phase 11 review).
+#
+# That review also killed the argument this comment used to make -- that a
+# single-constraint turn is "a monotone rescale that cannot reorder". False:
+# ``base`` is not scaled by the weight, so shrinking the attribute term moves
+# constraint evidence relative to retrieval order, and ONE constraint suffices.
+# 111 of the 527 changed turns have exactly one active constraint. The module
+# docstring above carries the counterexample, and the same error sat in the
+# Phase 6 paragraph next to it.
+#
+# The census in the tool is still worth reading for what the mechanism had to
+# work with -- CP 11.4's case (firmly meant, poorly attested) occurs 4 times in
+# 1762 constraint occurrences, 0.2% -- but no claim here rests on it.
 #
 # So this ships OFF on the same rule as USE_PROFILE: the burden is on the
-# change, and "changes nothing measurable" is not evidence for it. Unlike
-# USE_PROFILE there is no measured harm either -- the honest summary is no
-# evidence in either direction, and weighting uniformly shrinks the attribute
-# term, which is the one component McNemar establishes on this set
-# (+6, 6/0, p = 0.0312). Shrinking the only thing that works, for no measured
-# gain, is not a trade to make blind.
+# change, and reordering only below the scored cut is not evidence for it.
+# Unlike USE_PROFILE there is no measured harm either -- the honest summary is
+# no evidence in either direction. What tips it is that weighting shrinks the
+# attribute term, and constraint ranking is the one component McNemar
+# establishes on this set (+6, 6/0, p = 0.0312). Shrinking the only thing that
+# works, for no measured gain, is not a trade to make blind.
 #
 # Everything is built, tested (CP 11.3/11.4/11.5 in tests/test_confidence.py)
 # and one flag from live. EC itself is computed and stored regardless: it is

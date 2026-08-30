@@ -33,7 +33,8 @@ from starter.catalog_meta import lookup as meta_lookup
 from starter.contracts import Context
 from starter.ranking import (RELIABILITY_KEY, SCORED_SLOTS, VIOLATION_SLOTS,
                              active_constraints, classify, constraint_weights,
-                             slot_confidence)
+                             rank, slot_confidence)
+from starter.retrieval import DEFAULT_ROUTES, POOL_LIMIT, retrieve
 from starter.reliability import match_reliability, reliability_of, slot_coverage
 from starter.state import EC_HEDGED, EC_REQUIREMENT, EC_STATED
 from tools import config_guard
@@ -149,10 +150,12 @@ def main() -> None:
         print(f"     {count} constraint(s){per_turn_constraints[count]:>8}{share:>9.1%}")
     print(f"   turns where the weights DIFFER between slots: "
           f"{weight_spread_turns:>6}{weight_spread_turns / turns:>9.1%}")
-    print("   A turn with one constraint, or with equal weights, is one where "
-          "weighting\n   scales every candidate's attribute term by the same "
-          "factor -- a monotone\n   rescale that cannot reorder. Only the "
-          "spread rows can move a ranking.")
+    print("   These counts describe the INPUT, and nothing more. An earlier "
+          "version of\n   this tool argued from them that a single-constraint "
+          "turn 'cannot reorder'.\n   That was false -- `base` is not scaled "
+          "by the weight, so one constraint is\n   enough to cross two "
+          "candidates (B Phase 11 review). The effect is measured\n   "
+          "directly below instead of inferred from here.")
 
     print("\n   Evidence Confidence actually assigned:")
     for value in sorted(ec_values, reverse=True):
@@ -172,6 +175,93 @@ def main() -> None:
                   ("low EC", "high MR"): "CP 11.5",
                   ("low EC", "low MR"): "both weak"}[(ec, mr)]
             print(f"     {ec:9}/{mr:9}{cp:>12}{count:>9}{count / total:>9.1%}")
+
+    # -- 2b. DIRECT rank sensitivity, not inferred ------------------------
+    #
+    # The aggregates above establish that no session changed its Top-10 hit
+    # verdict. They cannot establish that nothing moved: a reorder below rank
+    # 10, or one among non-targets above it, is invisible to HR, MRR and MTTC
+    # alike. So rank each captured turn's pool BOTH ways and diff the orders.
+    print("\nrank sensitivity, measured directly (same pool, ranked twice)")
+    order_changed = 0
+    top10_order_changed = 0
+    top10_set_changed = 0
+    target_eligible = 0
+    target_moved = 0
+    deltas: list[int] = []
+    changed_by_constraints: Counter = Counter()
+    eligible_turns = 0
+    started = time.time()
+
+    for session_id, captures in agent.by_session().items():
+        target = target_of[session_id]
+        for capture in captures:
+            context = Context(
+                session_id=session_id, turn=capture["turn"],
+                user_message=capture["message"], state=capture["state"],
+            )
+            context.derived[RELIABILITY_KEY] = reliabilities
+            pool = retrieve(agent.connection, context, POOL_LIMIT, DEFAULT_ROUTES)
+            if not pool:
+                continue
+            eligible_turns += 1
+            metadata = meta_lookup(agent.connection,
+                                   [c.parent_asin for c in pool])
+            orders = {}
+            for enabled in (False, True):
+                ranking.USE_CONFIDENCE_WEIGHTING = enabled
+                orders[enabled] = [
+                    c.parent_asin
+                    for c in rank(pool, context, metadata, len(pool)).ranked
+                ]
+            ranking.USE_CONFIDENCE_WEIGHTING = False
+
+            constraints, _ = active_constraints(context)
+            if orders[False] != orders[True]:
+                order_changed += 1
+                changed_by_constraints[len(constraints)] += 1
+            # Order and SET are different questions: a swap inside the top 10
+            # changes the order a shopper sees while leaving the scored set
+            # -- and therefore HR -- untouched. Reported separately.
+            if orders[False][:10] != orders[True][:10]:
+                top10_order_changed += 1
+            if set(orders[False][:10]) != set(orders[True][:10]):
+                top10_set_changed += 1
+            if target in orders[False]:
+                target_eligible += 1
+                before = orders[False].index(target)
+                after = orders[True].index(target)
+                if before != after:
+                    target_moved += 1
+                    deltas.append(after - before)
+
+    print(f"   turns with ANY candidate-order change   {order_changed:>7}"
+          f"{order_changed / eligible_turns:>9.1%}  of {eligible_turns}")
+    print(f"   turns with a Top-10 ORDER change        {top10_order_changed:>7}"
+          f"{top10_order_changed / eligible_turns:>9.1%}")
+    print(f"   turns with a Top-10 SET change          {top10_set_changed:>7}"
+          f"{top10_set_changed / eligible_turns:>9.1%}  "
+          "(what HR can even see)")
+    print(f"   turns where the TARGET's rank moved     {target_moved:>7}"
+          f"{(target_moved / target_eligible if target_eligible else 0):>9.1%}"
+          f"  of {target_eligible} turns with the target in pool")
+    if deltas:
+        ordered = sorted(deltas)
+        mean = sum(ordered) / len(ordered)
+        print(f"   target rank delta (+ = worse): mean {mean:+.2f}  "
+              f"median {ordered[len(ordered) // 2]:+d}  "
+              f"min {ordered[0]:+d}  max {ordered[-1]:+d}")
+    else:
+        print("   target rank delta: n/a -- no target's rank moved")
+    if changed_by_constraints:
+        print("   order changes by active-constraint count:")
+        for count in sorted(changed_by_constraints):
+            print(f"     {count} constraint(s){changed_by_constraints[count]:>8}")
+        if changed_by_constraints.get(1):
+            print("     note the 1-constraint row: a single constraint DOES "
+                  "reorder, which is\n     what makes the old census argument "
+                  "wrong.")
+    print(f"   ({time.time() - started:.0f}s)")
 
     # -- 3. the label-based check on the derived MR -----------------------
     print("\nCP 11.2 check: how often each slot CONDEMNS the known target")

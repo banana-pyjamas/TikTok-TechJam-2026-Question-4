@@ -402,26 +402,35 @@ _REQUIREMENT_TOKENS = frozenset({
 def evidence_confidence(message: object) -> float:
     """CP 11.1 -- how firmly this turn asserts whatever it mentions.
 
-    Deterministic and offline, read from the shopper's phrasing:
+    Deterministic and offline, read from the shopper's phrasing, strongest
+    signal first:
 
         1.0  requirement language -- "a key requirement is", "what matters is"
-        0.9  a correction -- they stopped to replace something we had
         0.4  hedged -- "maybe", "something", "still exploring"
+        0.9  a correction -- they stopped to replace something we had
         0.7  otherwise: a plain declarative mention
 
-    Requirement language outranks a hedge ("I need something black" is a
-    requirement that happens to contain "something"), and a correction
-    outranks a hedge for the same reason -- the shopper spent a turn on it.
+    Requirement language outranks a hedge: "I need something black" is a
+    requirement that happens to contain "something", not a hesitation.
+
+    A hedge outranks a CORRECTION, which is the one ordering that is not
+    obvious. Requirement words and hedges both describe how committed the
+    shopper is to the VALUE; a correction cue ("actually", "instead")
+    describes the EDIT, and is only a proxy for commitment. So "actually,
+    maybe denim" is a hedged 0.4 -- the shopper is replacing one thing with
+    something they are unsure of -- while "actually, make it denim" is a
+    confident 0.9. Ordering correction above hedge scored that first message
+    0.9, which the D Phase 11 interleaving test caught.
     """
     if not isinstance(message, str) or not message.strip():
         return EC_STATED
     tokens = set(terms(message))
     if tokens & _REQUIREMENT_TOKENS:
         return EC_REQUIREMENT
-    if _REPLACE_CUE_RE.search(message):
-        return EC_CORRECTION
     if tokens & _HEDGE_CUES:
         return EC_HEDGED
+    if _REPLACE_CUE_RE.search(message):
+        return EC_CORRECTION
     return EC_STATED
 
 

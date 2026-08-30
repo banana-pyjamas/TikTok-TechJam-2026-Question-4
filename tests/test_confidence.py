@@ -66,6 +66,12 @@ class CP111EvidenceConfidenceTest(unittest.TestCase):
             ("I need a jacket. A key requirement is: leather.", EC_REQUIREMENT),
             ("For that, what matters is: cotton.", EC_REQUIREMENT),
             ("Actually, make it denim.", EC_CORRECTION),
+            # A correction cue marks the EDIT; a hedge marks commitment to the
+            # VALUE, so a hedged correction is hedged. Found by the D Phase 11
+            # interleaving test, which expected 0.4 and got 0.9.
+            ("actually maybe denim", EC_HEDGED),
+            ("Actually, ignore my earlier preference. What I need is: denim.",
+             EC_REQUIREMENT),
             ("black leather jacket", EC_STATED),
             ("maybe something in black", EC_HEDGED),
             ("I'm looking for shoes, but I'm still exploring", EC_HEDGED),
@@ -308,6 +314,80 @@ class QuadrantTest(unittest.TestCase):
         self.assertAlmostEqual(both["attribute_score"], W_MATCH * (1.0 / 2))
 
 
+class SingleConstraintReordersTest(unittest.TestCase):
+    """B Phase 11 review: the "cannot reorder" claim was false.
+
+    The comments and the census tool argued that a turn with one active
+    constraint scales every candidate's attribute term by the same factor and
+    is therefore a monotone rescale that cannot change the order. It is not:
+    ``base`` is NOT multiplied by the weight, so changing the weight changes
+    the strength of constraint evidence RELATIVE to retrieval order, and one
+    constraint is enough to cross two candidates.
+
+    Pinned so the wording cannot drift back.
+    """
+
+    CONSTRAINTS = {"material": ["leather"]}
+
+    def _final(self, base, meta, weight):
+        return score_candidate(
+            Candidate(parent_asin="X", metadata={"fusion_score": base}),
+            self.CONSTRAINTS, meta, weights={"material": weight},
+        )["final_score"]
+
+    def test_one_constraint_flips_two_candidates(self) -> None:
+        matching_no_base = _meta(material={"leather"})   # base 0.00, MATCH
+        unknown_high_base = _meta()                      # base 0.06, UNKNOWN
+
+        at_full = (self._final(0.00, matching_no_base, 1.0),
+                   self._final(0.06, unknown_high_base, 1.0))
+        at_hedged = (self._final(0.00, matching_no_base, EC_HEDGED),
+                     self._final(0.06, unknown_high_base, EC_HEDGED))
+
+        self.assertGreater(at_full[0], at_full[1],
+                           "at full weight the matching candidate wins")
+        self.assertLess(at_hedged[0], at_hedged[1],
+                        "at a hedged weight the better-retrieved one wins -- "
+                        "a SINGLE constraint reordered the pool")
+
+    def test_the_reorder_is_visible_through_rank(self) -> None:
+        # Same thing end to end, so the property is pinned at the API a
+        # consumer actually calls and not only in the scoring helper.
+        state = SessionState(session_id="s")
+        state.slots["material"] = {"values": ["leather"], "cardinality": "multi",
+                                   "confidence": EC_HEDGED}
+        pool = [Candidate(parent_asin="MATCHES", metadata={"fusion_score": 0.00}),
+                Candidate(parent_asin="RETRIEVED", metadata={"fusion_score": 0.06})]
+        metadata = {"MATCHES": _meta(material={"leather"}), "RETRIEVED": _meta()}
+
+        orders = {}
+        for enabled in (False, True):
+            with mock.patch.object(ranking, "USE_CONFIDENCE_WEIGHTING", enabled):
+                result = rank(pool, _context(state, {"material": 1.0}),
+                              metadata, 10)
+            orders[enabled] = [c.parent_asin for c in result.ranked]
+
+        self.assertEqual(orders[False], ["MATCHES", "RETRIEVED"])
+        self.assertEqual(orders[True], ["RETRIEVED", "MATCHES"])
+
+    def test_the_same_holds_for_the_phase_6_denominator(self) -> None:
+        # The identical error sat in ranking's module docstring one phase
+        # earlier ("UNKNOWN never changes the relative order of candidates").
+        # Adding a second constraint that is UNKNOWN for both candidates
+        # halves the attribute term and crosses them, with no weighting at all.
+        one = {"material": ["leather"]}
+        two = {"material": ["leather"], "brand": ["acme"]}
+        matching = _meta(material={"leather"})
+
+        def final(constraints, base, meta):
+            return score_candidate(
+                Candidate(parent_asin="X", metadata={"fusion_score": base}),
+                constraints, meta, weights=None)["final_score"]
+
+        self.assertGreater(final(one, 0.00, matching), final(one, 0.06, _meta()))
+        self.assertLess(final(two, 0.00, matching), final(two, 0.06, _meta()))
+
+
 class WeightAssemblyTest(unittest.TestCase):
     def test_weight_is_ec_times_mr(self) -> None:
         state = _state("maybe something in black")
@@ -342,3 +422,158 @@ class WeightAssemblyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentLevelConfidenceIsolationTest(unittest.TestCase):
+    """D1 / D2 / D5 — confidence is per-session state, exercised through the
+    real ``Agent`` rather than by hand-built ``SessionState`` objects.
+
+    Phase 11 put a new mutable field inside ``state.slots``. Everything the
+    single-writer invariant already promised has to keep holding for it:
+    ``reset`` clears it, interleaved sessions never see each other's, and the
+    catalog-global reliability table is never written to.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from pathlib import Path
+
+        from starter.agent import Agent
+
+        catalog = Path("data/catalog.jsonl")
+        if not catalog.exists():
+            raise unittest.SkipTest("catalog not available")
+        cls.agent = Agent(str(catalog))
+
+    PROFILE = {"purchase_frequency": "often", "average_prior_rating": 4.0,
+               "rating_style": "generous", "preference_tags": ["fit"],
+               "summary": "likes fitted clothes"}
+    OTHER_PROFILE = {"purchase_frequency": "rarely", "average_prior_rating": 2.0,
+                     "rating_style": "harsh", "preference_tags": ["warmth"],
+                     "summary": "wants warm things"}
+
+    def _slots(self, session_id: str) -> dict:
+        return self.agent._states[session_id].slots
+
+    def test_d1_reset_clears_confidence_and_history(self) -> None:
+        self.agent.reset("D1", self.PROFILE)
+        self.agent.respond("D1", "maybe leather jacket", 1, 10)
+        slots = self._slots("D1")
+        self.assertEqual(slots["material"]["values"], ["leather"])
+        self.assertAlmostEqual(slots["material"]["confidence"], EC_HEDGED)
+
+        self.agent.reset("D1", self.OTHER_PROFILE)
+        state = self.agent._states["D1"]
+        self.assertEqual(state.slots, {}, "old slots and confidence must be gone")
+        self.assertEqual(state.evidence, [])
+        self.assertEqual(state.provenance, [])
+        self.assertEqual(state.turn, 0)
+        self.assertEqual(state.user_profile, self.OTHER_PROFILE)
+
+        # The new session's confidence comes only from the new session.
+        self.agent.respond("D1", "I need cotton. A key requirement.", 1, 10)
+        self.assertEqual(self._slots("D1")["material"]["values"], ["cotton"])
+        self.assertNotIn("confidence", self._slots("D1")["material"],
+                         "a requirement is EC 1.0, stored as absence")
+
+    def test_d1_reset_does_not_leak_into_the_callers_profile(self) -> None:
+        profile = dict(self.PROFILE)
+        self.agent.reset("D1b", profile)
+        self.agent.respond("D1b", "maybe leather", 1, 10)
+        self.agent._states["D1b"].user_profile["preference_tags"].append("x")
+        self.assertEqual(profile["preference_tags"], ["fit"])
+
+    def test_d2_interleaved_sessions_keep_their_own_confidence(self) -> None:
+        self.agent.reset("A", self.PROFILE)
+        self.agent.reset("B", self.OTHER_PROFILE)
+
+        self.agent.respond("A", "maybe leather jacket", 1, 10)
+        self.agent.respond("B", "I need cotton. A key requirement.", 1, 10)
+
+        self.assertAlmostEqual(self._slots("A")["material"]["confidence"],
+                               EC_HEDGED)
+        self.assertNotIn("confidence", self._slots("B")["material"])
+        self.assertEqual(self._slots("A")["material"]["values"], ["leather"])
+        self.assertEqual(self._slots("B")["material"]["values"], ["cotton"])
+
+        # Escalating A must not touch B.
+        self.agent.respond("A", "leather is a hard requirement", 2, 10)
+        self.assertNotIn("confidence", self._slots("A")["material"])
+        self.assertEqual(self._slots("B")["material"]["values"], ["cotton"])
+        self.assertNotIn("confidence", self._slots("B")["material"])
+
+        # Replacing in B must not touch A.
+        self.agent.respond("B", "actually maybe denim", 2, 10)
+        self.assertEqual(self._slots("B")["material"]["values"], ["denim"])
+        self.assertAlmostEqual(self._slots("B")["material"]["confidence"],
+                               EC_HEDGED)
+        self.assertEqual(self._slots("A")["material"]["values"], ["leather"])
+        self.assertNotIn("confidence", self._slots("A")["material"])
+
+    def test_d2_no_slot_object_is_shared_between_sessions(self) -> None:
+        self.agent.reset("A2", self.PROFILE)
+        self.agent.reset("B2", self.PROFILE)
+        self.agent.respond("A2", "maybe leather", 1, 10)
+        self.agent.respond("B2", "maybe leather", 1, 10)
+        self.assertIsNot(self._slots("A2")["material"],
+                         self._slots("B2")["material"])
+
+    def test_d5_the_shared_reliability_table_is_never_mutated(self) -> None:
+        import copy as _copy
+
+        before = _copy.deepcopy(self.agent._reliability)
+        identity = id(self.agent._reliability)
+        self.agent.reset("R", self.PROFILE)
+        for turn, message in enumerate(
+                ["maybe leather jacket", "I need black. A requirement.",
+                 "actually denim", "size 10"], start=1):
+            self.agent.respond("R", message, turn, 10)
+        self.assertEqual(self.agent._reliability, before,
+                         "catalog-global reliability is read-only state")
+        self.assertEqual(id(self.agent._reliability), identity,
+                         "and it is shared, not rebuilt per turn")
+
+
+class ReliabilityFailureBoundaryTest(unittest.TestCase):
+    """D3 — the documented fallback boundary, and where it deliberately ends.
+
+    "No statistics" means "trust everything", because discounting an unknown
+    slot would be a hard filter arriving through the back door. But a table
+    that exists with the WRONG SHAPE is a programming error, not a missing
+    statistic, and it is left to propagate rather than be swallowed into a
+    silently-degraded reliability table.
+    """
+
+    def test_missing_table_yields_no_statistics(self) -> None:
+        self.assertEqual(slot_coverage(sqlite3.connect(":memory:")), {})
+
+    def test_empty_table_yields_no_statistics(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        create_table(connection)
+        self.assertEqual(slot_coverage(connection), {})
+
+    def test_no_statistics_means_every_slot_fully_trusted(self) -> None:
+        self.assertEqual(match_reliability(None), {})
+        self.assertEqual(match_reliability({}), {})
+        for slot in ("color", "size", "not_a_slot"):
+            self.assertEqual(reliability_of(None, slot), DEFAULT_RELIABILITY)
+            self.assertEqual(reliability_of({}, slot), DEFAULT_RELIABILITY)
+
+    def test_malformed_values_fall_back_deterministically(self) -> None:
+        for bad in (None, float("nan"), "0.5", [], {}):
+            self.assertEqual(reliability_of({"color": bad}, "color"),
+                             DEFAULT_RELIABILITY, repr(bad))
+        self.assertEqual(match_reliability({"color": float("nan"),
+                                            "size": "x"}), {})
+
+    def test_a_corrupt_schema_propagates_rather_than_degrading(self) -> None:
+        # The boundary, pinned deliberately. A product_meta that exists but is
+        # missing a column we aggregate is a broken build, not a catalog
+        # without colour data. Swallowing it would hand back a reliability
+        # table that is quietly wrong, and every score derived from it would
+        # be quietly wrong too.
+        connection = sqlite3.connect(":memory:")
+        connection.execute(f"CREATE TABLE {TABLE} (parent_asin TEXT, colors TEXT)")
+        connection.execute(f"INSERT INTO {TABLE} VALUES ('A', 'black')")
+        with self.assertRaises(sqlite3.Error):
+            slot_coverage(connection)
