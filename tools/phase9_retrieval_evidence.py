@@ -14,9 +14,9 @@ happens.
 
 TWO PHASES
 
-capture   run the live evaluator loop under the committed configuration, with
-          an agent subclassed only to snapshot the state each turn left behind,
-          and to count which route functions and which SQL queries really ran.
+capture   run the live evaluator loop under the committed configuration
+          (``tools.capture``), and count which route functions and which SQL
+          queries really ran.
 replay    re-run every route over those captured contexts and fuse them under
           each route set.
 
@@ -35,17 +35,16 @@ Usage:  python3 -m tools.phase9_retrieval_evidence
 
 from __future__ import annotations
 
-import copy
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter import retrieval
-from starter.agent import Agent
 from starter.catalog_meta import lookup as meta_lookup
 from starter.contracts import Context
 from starter.retrieval import DEFAULT_ROUTES, POOL_LIMIT, fuse
 from tools import config_guard
+from tools.capture import CapturingAgent
 from tools.significance import format_test, mcnemar
 
 CATALOG = "data/catalog.jsonl"
@@ -59,34 +58,6 @@ CONFIGS: dict[str, tuple[str, ...]] = {
     "bm25+cat+attribute  (ref)": ("bm25", "category", "attribute"),
 }
 COMMITTED = "bm25+category  (committed)"
-
-
-class CapturingAgent(Agent):
-    """The shipped agent, plus a snapshot of the state each turn left behind.
-
-    ``respond`` delegates; the capture happens afterwards, so the dialogue and
-    the score are the shipped ones. The state is deep-copied because the real
-    one keeps mutating for the rest of the session.
-    """
-
-    def __init__(self, catalog_path: str) -> None:
-        super().__init__(catalog_path)
-        self.order: list[str] = []
-        self.captured: list[dict] = []
-
-    def reset(self, session_id: str, user_profile: dict) -> None:
-        super().reset(session_id, user_profile)
-        self.order.append(session_id)
-
-    def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
-        response = super().respond(session_id, user_message, turn, top_k)
-        self.captured.append({
-            "session_id": session_id,
-            "turn": turn,
-            "message": user_message,
-            "state": copy.deepcopy(self._states[session_id]),
-        })
-        return response
 
 
 def _instrument_routes() -> tuple[Counter, Counter]:
@@ -175,15 +146,10 @@ def main() -> None:
         session_id: str(sample["ground_truth"]["parent_asin"])
         for session_id, sample in zip(agent.order, samples)
     }
-    scenario_of = {
-        session_id: str(sample["scenario_type"])
-        for session_id, sample in zip(agent.order, samples)
-    }
+    scenario_of = agent.sample_field(samples, "scenario_type")
 
     # -- replay ----------------------------------------------------------
-    by_session: dict[str, list[dict]] = defaultdict(list)
-    for capture in agent.captured:
-        by_session[capture["session_id"]].append(capture)
+    by_session = agent.by_session()
 
     records: list[dict] = []
     precap_sizes: list[int] = []
@@ -205,7 +171,7 @@ def main() -> None:
             "in_precap": False,
             "in_final": False,
         }
-        for capture in sorted(captures, key=lambda c: c["turn"]):
+        for capture in captures:
             context = Context(
                 session_id=session_id,
                 turn=capture["turn"],

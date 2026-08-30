@@ -64,6 +64,7 @@ STARTER_MODULES = (
     "state",
     "strategy",
     "text",
+    "vocabulary",
 )
 
 FLAG_PREFIX = "USE_"

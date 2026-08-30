@@ -21,6 +21,7 @@ from typing import Any
 
 from starter.profile import ALL_TRAIT_TERMS
 from starter.state import _COLOR_ALIASES, _COLORS, _MATERIALS
+from starter.vocabulary import product_terms
 
 _TOKEN = re.compile(r"[a-z0-9.]+")
 # Sizes as they appear in catalog metadata, e.g. "size 10", "size: XL".
@@ -35,13 +36,22 @@ def create_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {TABLE} ("
         "parent_asin TEXT PRIMARY KEY, colors TEXT, materials TEXT, "
-        "cats TEXT, store TEXT, sizes TEXT, price REAL, traits TEXT)"
+        "cats TEXT, store TEXT, sizes TEXT, price REAL, traits TEXT, "
+        "vocab TEXT)"
     )
 
 
-def signals(product: dict) -> tuple[str, str, str, str, str, float | None, str]:
+def signals(
+    product: dict,
+) -> tuple[str, str, str, str, str, float | None, str, str]:
     """The row this product contributes: colours, materials, category tokens,
-    store, sizes, price, profile-trait vocabulary."""
+    store, sizes, price, profile-trait vocabulary, candidate vocabulary.
+
+    New signals are APPENDED. Existing positions are part of how callers read
+    this tuple (``tests/test_ranking.py`` indexes ``[2]`` for category tokens),
+    and ``agent._build_index`` derives its INSERT placeholders from the row
+    length, so appending is the one safe way to grow it.
+    """
     categories = " ".join(str(value) for value in (product.get("categories") or [])).lower()
     store = str(product.get("store") or "").lower()
     text = " ".join([
@@ -70,6 +80,9 @@ def signals(product: dict) -> tuple[str, str, str, str, str, float | None, str]:
         " ".join(sizes),
         price,
         " ".join(sorted(tokens & ALL_TRAIT_TERMS)),
+        # Phase 10. Order-sensitive (title first), so unlike the sets above it
+        # is stored as produced rather than sorted.
+        " ".join(product_terms(product)),
     )
 
 
