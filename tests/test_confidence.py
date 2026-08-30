@@ -634,3 +634,52 @@ class NegatedRequirementTest(unittest.TestCase):
         update_state(state, "leather is not required", 2)
         self.assertLess(slot_confidence(_context(state), "material"), 1.0,
                         "withdrawing a requirement must never raise confidence")
+
+
+class PartialRemovalConfidenceTest(unittest.TestCase):
+    """D Phase 12 review, Q1 — the sibling escalation path.
+
+    ``apply_delta`` REBUILDS the slot entry when a removal leaves survivors,
+    so anything not copied across is lost. ``confidence`` was not copied, so
+    removing one value of a multi-valued slot promoted the remaining ones from
+    a hedge to maximum insistence -- the same defect class as P2, at a
+    different site, and score-bearing for the same reason (CP 12.3's decay
+    reads EC whatever USE_CONFIDENCE_WEIGHTING says).
+    """
+
+    def test_removing_a_sibling_does_not_promote_the_survivor(self) -> None:
+        state = _state("maybe leather and denim jacket", "no leather")
+        self.assertEqual(state.slots["material"]["values"], ["denim"])
+        self.assertAlmostEqual(
+            slot_confidence(_context(state), "material"), EC_HEDGED,
+            msg="removing leather says nothing about commitment to denim")
+
+    def test_the_same_holds_for_colour(self) -> None:
+        state = _state("maybe black and navy", "not black")
+        self.assertEqual(state.slots["color"]["values"], ["navy"])
+        self.assertAlmostEqual(
+            slot_confidence(_context(state), "color"), EC_HEDGED)
+
+    def test_a_firm_survivor_stays_firm(self) -> None:
+        state = _state("I need leather and denim. A requirement.", "no leather")
+        self.assertEqual(state.slots["material"]["values"], ["denim"])
+        self.assertEqual(slot_confidence(_context(state), "material"), 1.0)
+
+    def test_removing_everything_still_drops_the_slot(self) -> None:
+        state = _state("maybe leather and denim jacket", "no leather", "no denim")
+        self.assertNotIn("material", state.slots)
+
+    def test_bounds_survive_a_partial_removal_too(self) -> None:
+        # Same rebuild, same class of loss. Defensive: a single-valued budget
+        # cannot currently reach this branch with survivors.
+        state = SessionState(session_id="s")
+        state.slots["budget"] = {"values": ["under $100", "under $50"],
+                                 "cardinality": "multi",
+                                 "bounds": {"min": None, "max": 100.0},
+                                 "confidence": EC_HEDGED}
+        from starter.state import apply_delta
+        apply_delta(state, {"budget": {"values": [], "remove": ["under $50"],
+                                       "cardinality": "multi"}}, 2)
+        self.assertEqual(state.slots["budget"]["values"], ["under $100"])
+        self.assertEqual(state.slots["budget"]["bounds"], {"min": None, "max": 100.0})
+        self.assertAlmostEqual(state.slots["budget"]["confidence"], EC_HEDGED)

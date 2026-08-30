@@ -329,8 +329,15 @@ class Phase11InteractionTest(unittest.TestCase):
     """
 
     def test_the_bound_holds_while_phase_11_weighting_is_off(self) -> None:
-        self.assertFalse(ranking.USE_CONFIDENCE_WEIGHTING,
-                         "if this flag ships True, re-derive W_POPULARITY")
+        # Read the SOURCE, not the live attribute: another test in the same
+        # process can write the committed value back over a source edit, which
+        # is precisely how this guard passed in the full suite while failing
+        # when run alone (D Phase 12 review, Q2).
+        from tools import config_guard
+
+        self.assertFalse(
+            config_guard.source_flags()[("ranking", "USE_CONFIDENCE_WEIGHTING")],
+            "if this flag ships True, re-derive W_POPULARITY")
         # Weakest possible match under OFF: one of n constraints matched.
         for n in (1, 2, 3, 6):
             weakest_match = W_MATCH / n

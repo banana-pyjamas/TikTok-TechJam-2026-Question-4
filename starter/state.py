@@ -800,7 +800,22 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
             existing_values = [v for v in existing_values if v not in remove]
             if not positive:
                 if existing_values:
-                    state.slots[slot] = {"values": existing_values, "cardinality": cardinality}
+                    # Rebuilt, so anything not copied across is LOST. Removing
+                    # one value of a multi-valued slot says nothing about the
+                    # shopper's commitment to the ones that remain: "maybe
+                    # leather and denim" then "no leather" must leave denim
+                    # hedged, not promote it to maximum insistence by dropping
+                    # its confidence (D Phase 12 review, Q1). Bounds are
+                    # carried for the same reason -- defensively, since a
+                    # single-valued budget cannot reach here with survivors.
+                    survivor: dict[str, Any] = {
+                        "values": existing_values, "cardinality": cardinality,
+                    }
+                    if isinstance(existing, dict):
+                        if existing.get("bounds") is not None:
+                            survivor["bounds"] = existing["bounds"]
+                        _carry_confidence(survivor, existing, None, combine=None)
+                    state.slots[slot] = survivor
                 else:
                     state.slots.pop(slot, None)
                 continue

@@ -227,6 +227,53 @@ def discover_numeric_constants() -> set[tuple[str, str]]:
     return found
 
 
+def source_flags() -> dict[tuple[str, str], Any]:
+    """Every ``USE_`` flag's value as WRITTEN IN THE SOURCE.
+
+    Not as currently held in memory. The two differ whenever anything has
+    assigned to a flag at runtime -- a measurement tool mid-sweep, or a test
+    that called ``restore_committed_flags``.
+
+    That difference is why this exists (D Phase 12 review, Q2). A test that
+    tried to pin a committed flag value by reading the live module could be
+    silently defeated by any earlier test in the same process writing the
+    committed value back over a source edit, which is exactly what happened:
+    the Phase 11/12 interaction guard passed in the full suite and failed
+    only when run alone. Reading the file cannot be undone by another test.
+    """
+    found: dict[tuple[str, str], Any] = {}
+    for module_name in STARTER_MODULES:
+        source = Path(_module(module_name).__file__).read_text(encoding="utf-8")
+        for node in ast.parse(source).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if not (isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, bool)):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.startswith(FLAG_PREFIX):
+                    found[(module_name, target.id)] = node.value.value
+    return found
+
+
+def assert_committed_flags_match_source() -> None:
+    """Raise if ``COMMITTED_FLAGS`` disagrees with what the modules declare.
+
+    The registry says what the committed configuration IS; the source is that
+    configuration. Letting them drift would make every "restored to committed
+    values" claim in this package unverifiable.
+    """
+    declared = source_flags()
+    drifted = [
+        f"{module}.{name}: source {declared[(module, name)]!r} != "
+        f"COMMITTED_FLAGS {value!r}"
+        for (module, name), value in sorted(COMMITTED_FLAGS.items())
+        if (module, name) in declared and declared[(module, name)] != value
+    ]
+    if drifted:
+        raise SystemExit("config_guard: " + "; ".join(drifted))
+
+
 def assert_all_constants_pinned() -> None:
     """Raise if a numeric tunable exists that ``COMMITTED_CONSTANTS`` omits.
 

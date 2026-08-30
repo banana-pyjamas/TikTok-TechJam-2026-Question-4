@@ -160,11 +160,41 @@ class CommittedConstantsTest(unittest.TestCase):
             retrieval.DEFAULT_ROUTES = original
 
     def test_restore_puts_every_flag_back(self) -> None:
-        agent.USE_MULTI_ROUTE = False
-        ranking.USE_PROFILE = True
-        config_guard.restore_committed_flags()
-        self.assertTrue(agent.USE_MULTI_ROUTE)
-        self.assertFalse(ranking.USE_PROFILE)
+        # Snapshot and restore. This test writes committed values onto live
+        # modules, and without the restore it silently reverted any
+        # source-level flag edit for every test that ran after it -- which
+        # defeated the Phase 11/12 interaction guard in the full suite while
+        # it passed when run alone (D Phase 12 review, Q2).
+        before = {
+            (module, name): getattr(config_guard._module(module), name)
+            for module, name in config_guard.COMMITTED_FLAGS
+        }
+        try:
+            agent.USE_MULTI_ROUTE = False
+            ranking.USE_PROFILE = True
+            config_guard.restore_committed_flags()
+            self.assertTrue(agent.USE_MULTI_ROUTE)
+            self.assertFalse(ranking.USE_PROFILE)
+        finally:
+            for (module, name), value in before.items():
+                setattr(config_guard._module(module), name, value)
+
+    def test_committed_flags_match_what_the_source_declares(self) -> None:
+        # The registry claims to describe the committed configuration; the
+        # source IS it. If they drift, every "restored to committed values"
+        # line in this package becomes unverifiable.
+        config_guard.assert_committed_flags_match_source()
+
+    def test_source_flags_are_read_from_disk_not_memory(self) -> None:
+        original = ranking.USE_POPULARITY
+        ranking.USE_POPULARITY = not original
+        try:
+            self.assertEqual(
+                config_guard.source_flags()[("ranking", "USE_POPULARITY")],
+                original,
+                "source_flags must survive runtime mutation")
+        finally:
+            ranking.USE_POPULARITY = original
 
     def test_describe_names_the_whole_configuration(self) -> None:
         described = config_guard.describe()
