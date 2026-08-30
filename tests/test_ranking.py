@@ -175,15 +175,45 @@ class CP64UnknownIsNotViolation(unittest.TestCase):
         result = rank(candidates, ctx, metadata, 10)
         self.assertEqual([c.parent_asin for c in result.ranked], ["SILENT", "VIOLATES"])
 
-    def test_unknown_contributes_to_neither_ratio(self) -> None:
+    def test_unknown_is_never_counted_as_a_violation(self) -> None:
         ctx = _context(color=["black"], material=["denim"])
         metadata = {"HALF": _meta(color={"black"})}  # material unknown
         result = rank([_candidate("HALF", 0.01)], ctx, metadata, 10)
         detail = result.diagnostics["HALF"]
         self.assertEqual(detail["matched"], ["color"])
         self.assertEqual(detail["violated"], [])
-        self.assertGreater(detail["attribute_score"], 0.0)
         self.assertEqual(detail["violation_penalty"], 0.0)
+        self.assertGreater(detail["attribute_score"], 0.0)
+
+    def test_unknown_denominator_convention_is_flag_controlled(self) -> None:
+        """The reported gap: the previous assertion (attribute_score > 0)
+        held under BOTH conventions, so it could not tell them apart. Pin
+        each arm to an exact value instead."""
+        one_slot = _context(color=["black"])
+        two_slots = _context(color=["black"], material=["denim"])
+        metadata = {"HALF": _meta(color={"black"})}  # material is UNKNOWN
+
+        def attribute_score(ctx) -> float:
+            result = rank([_candidate("HALF", 0.01)], ctx, metadata, 10)
+            return result.diagnostics["HALF"]["attribute_score"]
+
+        baseline = attribute_score(one_slot)
+        self.assertAlmostEqual(baseline, ranking.W_MATCH)
+
+        original = ranking.EXCLUDE_UNKNOWN_FROM_RATIO
+        try:
+            ranking.EXCLUDE_UNKNOWN_FROM_RATIO = False
+            self.assertAlmostEqual(attribute_score(two_slots), ranking.W_MATCH / 2,
+                                   msg="flag off: UNKNOWN dilutes the ratio")
+            ranking.EXCLUDE_UNKNOWN_FROM_RATIO = True
+            self.assertAlmostEqual(attribute_score(two_slots), baseline,
+                                   msg="flag on: UNKNOWN changes nothing")
+        finally:
+            ranking.EXCLUDE_UNKNOWN_FROM_RATIO = original
+
+    def test_flag_default_preserves_measured_behaviour(self) -> None:
+        # A disabled feature must not silently change behaviour.
+        self.assertFalse(ranking.EXCLUDE_UNKNOWN_FROM_RATIO)
 
     def test_size_mismatch_is_never_a_violation(self) -> None:
         # Size metadata is too sparse to treat a miss as evidence against.
@@ -198,6 +228,59 @@ class CP64UnknownIsNotViolation(unittest.TestCase):
         self.assertEqual(detail["matched"], [])
         self.assertEqual(detail["violated"], [])
         self.assertEqual(detail["final_score"], detail["base_score"])
+
+
+class MultiWordCategoryTest(unittest.TestCase):
+    """Phase 6 review Finding 2 -- a multi-word category value is a
+    conjunction. Matching on any single word made "swim trunks" match
+    "Women's Swimwear" and "tank top" match "Topcoats"."""
+
+    @staticmethod
+    def _cats(*names: str) -> dict:
+        from starter.catalog_meta import signals
+
+        _, _, cats, _, _, _ = signals({
+            "parent_asin": "X", "title": "", "categories": list(names),
+            "features": [], "details": {}, "store": "", "description": [],
+        })
+        return _meta(cats=set(cats.split()))
+
+    def test_shared_first_word_is_not_a_match(self) -> None:
+        for names, value in (
+            (("Clothing", "Women's Swimwear"), "swim trunks"),
+            (("Clothing", "Swim Goggles"), "swim trunks"),
+            (("Clothing", "Tops & Tees"), "tank top"),
+            (("Clothing", "Topcoats"), "tank top"),
+            (("Clothing", "Water Tanks"), "tank top"),
+        ):
+            self.assertEqual(
+                classify("category", [value], self._cats(*names)), VIOLATION,
+                msg=f"{value!r} must not match {names}",
+            )
+
+    def test_genuine_multi_word_category_still_matches(self) -> None:
+        self.assertEqual(
+            classify("category", ["swim trunks"],
+                     self._cats("Clothing", "Men's Swim Trunks")), MATCH)
+        self.assertEqual(
+            classify("category", ["tank top"],
+                     self._cats("Clothing", "Tank Tops")), MATCH)
+
+    def test_single_word_plural_tolerance_is_unaffected(self) -> None:
+        self.assertEqual(
+            classify("category", ["jacket"], self._cats("Clothing", "Jackets")), MATCH)
+        self.assertEqual(
+            classify("category", ["sock"], self._cats("Clothing", "Socks")), MATCH)
+        self.assertEqual(
+            classify("category", ["jacket"], self._cats("Clothing", "Socks")), VIOLATION)
+
+    def test_every_multi_word_canonical_category_is_covered(self) -> None:
+        # Guard: if state.py gains another multi-word canonical category,
+        # this conjunction rule must be considered for it too.
+        from starter.state import _CATEGORY_KEYWORDS
+
+        multi_word = {v for v in _CATEGORY_KEYWORDS.values() if " " in v}
+        self.assertEqual(multi_word, {"swim trunks", "tank top"})
 
 
 class CP65StableSorting(unittest.TestCase):

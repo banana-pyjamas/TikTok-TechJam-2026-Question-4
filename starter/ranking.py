@@ -15,10 +15,15 @@ Each active slot classifies a candidate as MATCH / VIOLATION / UNKNOWN:
 * VIOLATION the catalog asserts a DIFFERENT value for that slot;
 * UNKNOWN   the catalog says nothing about that slot.
 
-UNKNOWN is never a violation (CP 6.4, principle D) -- it contributes to
-neither ratio. This matters: on the frozen catalog only 47% of products
-carry a recognisable colour, 63% a material and 21% a price, so treating
-absent metadata as a mismatch would bury most of the catalog.
+UNKNOWN is never counted as a violation (CP 6.4, principle D). This matters:
+on the frozen catalog only 47% of products carry a recognisable colour, 63%
+a material and 21% a price, so treating absent metadata as a mismatch would
+bury most of the catalog.
+
+Whether UNKNOWN also stays OUT of the ratio denominator is controlled by
+``EXCLUDE_UNKNOWN_FROM_RATIO`` -- see that flag. The two conventions score
+differently and the choice is not yet settled, so it is explicit rather than
+implied by the prose.
 
 The violation penalty is bounded (``W_PENALTY``): a violating candidate is
 pushed down, never eliminated and never sent to -infinity (CP 6.3,
@@ -50,6 +55,27 @@ from starter.contracts import Candidate, Context, RankingResult
 # gains.
 W_MATCH = 0.10
 W_PENALTY = 0.02
+
+# How UNKNOWN slots affect the match/violation ratios (Phase 6 review).
+#
+# False (default, current measured behaviour): the denominator is every
+#   active constrained slot, so an UNKNOWN slot DILUTES the match ratio. A
+#   candidate with colour=MATCH scores 0.05 when material is also active but
+#   unknown, and 0.10 when colour is the only constraint -- the same true
+#   match, scored differently because the catalog happens to be silent about
+#   a second slot.
+# True: the denominator counts only slots with a known verdict, so an
+#   UNKNOWN slot changes the score neither way. This is what CP 6.4 and this
+#   module's prose describe.
+#
+# Measured on the public set: False -> HR 0.135 / TS 0.115512;
+#                             True  -> HR 0.130 / TS 0.111681.
+# So the principled convention scores slightly WORSE here. The current
+# behaviour systematically discounts candidates with sparser catalog
+# metadata, which may be an accidental fit to this catalog's sparsity rather
+# than something that holds on the hidden set. Left as an explicit flag so
+# Phase 7 can measure both arms instead of the choice being implicit.
+EXCLUDE_UNKNOWN_FROM_RATIO = False
 
 # Slots whose catalog evidence is reliable enough to call a mismatch a
 # violation. `size` is deliberately excluded: size metadata is sparse and
@@ -101,6 +127,23 @@ def _stem(token: str) -> str:
     return token[:-1] if len(token) > 3 and token.endswith("s") else token
 
 
+def _category_value_matches(tokens: set[str], value: str) -> bool:
+    """True only if EVERY word of a category value is present.
+
+    A multi-word category is a conjunction, not a disjunction: "swim trunks"
+    means swim AND trunks. Matching on any single word made "swim trunks"
+    match "Women's Swimwear" and "tank top" match "Topcoats" / "Water Tanks"
+    (Phase 6 review). Prefix matching is kept per word so the intended plural
+    tolerance (jacket -> jackets) still works.
+    """
+    stems = [_stem(word) for word in value.split() if word]
+    if not stems:
+        return False
+    return all(
+        any(token.startswith(stem) for token in tokens) for stem in stems
+    )
+
+
 def classify(slot: str, values: list[str], meta: dict[str, Any],
              bounds: dict[str, Any] | None = None) -> str:
     """MATCH / VIOLATION / UNKNOWN for one slot against one product."""
@@ -119,8 +162,7 @@ def classify(slot: str, values: list[str], meta: dict[str, Any],
         tokens = meta.get("cats") or set()
         if not tokens:
             return UNKNOWN
-        stems = {_stem(v) for value in values for v in value.split()}
-        if any(token.startswith(stem) for token in tokens for stem in stems if stem):
+        if any(_category_value_matches(tokens, value) for value in values):
             return MATCH
         return VIOLATION
 
@@ -154,8 +196,10 @@ def score_candidate(
     violated: list[str] = []
     considered = 0
     for slot, values in constraints.items():
-        considered += 1
         verdict = classify(slot, values, meta, bounds)
+        if verdict == UNKNOWN and EXCLUDE_UNKNOWN_FROM_RATIO:
+            continue  # contributes to neither ratio, denominator included
+        considered += 1
         if verdict == MATCH:
             matched.append(slot)
         elif verdict == VIOLATION and slot in VIOLATION_SLOTS:
