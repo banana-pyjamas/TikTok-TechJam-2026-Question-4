@@ -160,15 +160,27 @@ DIAGNOSTIC_KEYS = frozenset({
 # Measured directly by ranking each live turn's pool BOTH ways and diffing the
 # orders (``python3 -m tools.phase11_confidence``):
 #
-#   turns with a candidate-order change      440 / 1529   28.8%
-#   turns with a Top-10 order change           3 / 1529    0.2%
-#   turns where the TARGET's rank moved        0 /  327    0.0%
-#   sessions gained / lost                       0 / 0     p = 1.0000
+#   turns with a candidate-order change      446 /  872   51.1%
+#   turns with a Top-10 order change          37 /  872    4.2%
+#   turns where the TARGET's rank moved       19 /  366    5.2%
+#   sessions gained / lost                       1 / 1     p = 1.0000
 #
-# Those four move with the pipeline -- they are counted over the live
-# dialogue, and Phase 14 changed both the turn count and where the target
-# sits. Re-run the tool when anything upstream moves; the conclusion below has
-# not changed under any of it, but the numbers supporting it have.
+# PHASE 15 REVIVED THIS MECHANISM, AND THE ARGUMENT BELOW HAD TO CHANGE WITH
+# IT. Until clarification landed, this flag was measured EXACTLY inert: no
+# target ever moved a single position, and the case CP 11.4 exists for
+# (firmly meant, poorly attested) occurred 4 times in 1536 constraint
+# occurrences. With the shopper actually disclosing preferences there are
+# 3-constraint turns for the first time, weights differ between slots on 40%
+# of turns, CP 11.4's case occurs 86 times in 1146 (7.5%), and the target's
+# rank moves on 19 turns.
+#
+# So "no measured harm because it does nothing" is no longer available. It
+# now does something, and what it does measures -0.001588 TS at 1/1
+# discordant, p = 1.0000 -- no verdict, and a point estimate on the wrong
+# side of zero. Same shipping decision, different and weaker reason: it used
+# to ship OFF because it was inert, and it ships OFF now because the burden
+# is on the change and a live mechanism with a negative point estimate has
+# not met it.
 #
 # So the aggregates being identical to six decimals is a fact about the top of
 # the list, not about the ranking. Three in a thousand turns reorder the Top-10
@@ -181,21 +193,24 @@ DIAGNOSTIC_KEYS = frozenset({
 # single-constraint turn is "a monotone rescale that cannot reorder". False:
 # ``base`` is not scaled by the weight, so shrinking the attribute term moves
 # constraint evidence relative to retrieval order, and ONE constraint suffices.
-# 111 of the 440 changed turns have exactly one active constraint. The module
+# 102 of the 446 changed turns have exactly one active constraint. The module
 # docstring above carries the counterexample, and the same error sat in the
 # Phase 6 paragraph next to it.
 #
 # The census in the tool is still worth reading for what the mechanism had to
-# work with -- CP 11.4's case (firmly meant, poorly attested) occurs 4 times in
-# 1536 constraint occurrences, 0.3% -- but no claim here rests on it.
+# work with -- CP 11.4's case (firmly meant, poorly attested) occurs 86 times
+# in 1146 constraint occurrences, 7.5%, up from 4 in 1536 before Phase 15 --
+# but no claim here rests on it.
 #
 # So this ships OFF on the same rule as USE_PROFILE: the burden is on the
 # change, and reordering only below the scored cut is not evidence for it.
 # Unlike USE_PROFILE there is no measured harm either -- the honest summary is
-# no evidence in either direction. What tips it is that weighting shrinks the
-# attribute term, and constraint ranking is the one component McNemar
-# establishes on this set (+6, 6/0, p = 0.0312). Shrinking the only thing that
-# works, for no measured gain, is not a trade to make blind.
+# no evidence in either direction -- and after Phase 15 the point estimate is
+# slightly negative, which is weaker still. What tips it is that weighting
+# shrinks the attribute term, and constraint ranking is one of the components
+# McNemar establishes on this set (+6, 6/0, p = 0.0312 on the BM25 pool).
+# Shrinking something that works, for no measured gain, is not a trade to
+# make blind.
 #
 # Everything is built, tested (CP 11.3/11.4/11.5 in tests/test_confidence.py)
 # and one flag from live. EC itself is computed and stored regardless: it is
@@ -204,7 +219,24 @@ USE_CONFIDENCE_WEIGHTING = False
 
 # Ablation flag for the popularity prior (Phase 12).
 #
-# ON, and it is the largest established gain in the project.
+# ON, and it USED TO BE the largest established gain in the project. Phase 15
+# ended that: with clarification supplying real constraints the same term is
+# worth +0.0226 at 5/0 discordant, p = 0.0625 -- NO VERDICT.
+#
+# That is not a regression and it is the most interesting thing this comment
+# has ever said. The popularity prior was worth +0.0477 when the agent knew
+# almost nothing about the shopper, because on a benchmark whose targets sit
+# at the 99.5th review-count percentile a bestseller list is close to an
+# oracle for a query with no constraints in it. Give the ranker actual
+# constraints to score and the oracle stops being needed. A prior is supposed
+# to matter less as evidence arrives; this one measurably does, which is the
+# first direct evidence in this repo that it is behaving like a prior rather
+# than like the ranker.
+#
+# It stays ON. It is still positive on the point estimate, it costs nothing,
+# and "no verdict" is not evidence of harm -- but no one should quote this
+# term as established any more, and the sampling caveat below now carries
+# more of its weight than the score does.
 #
 # EVERY NUMBER IN THIS COMMENT IS THE LIVE PIPELINE, RE-MEASURED. It used to
 # be the Phase 12 pipeline stated in the present tense, and Phase 14 moved
@@ -221,9 +253,11 @@ USE_CONFIDENCE_WEIGHTING = False
 #
 # tools/phase7_ablation.py reports +10, 10/0, p = 0.0020 for the same flag.
 # Both are right and they are different comparisons: the ladder ablates
-# popularity at Run 3 -> Run 4, with no reranker above it, while the figure
-# here removes the term from the pipeline as it SHIPS. Read the scope, not
-# only the number.
+# popularity at Run 3 -> Run 4, with neither the reranker nor clarification
+# above it, while the figure here removes the term from the pipeline as it
+# SHIPS. The gap between them IS the finding -- the ladder rung is the
+# prior's value to an agent that knows nothing, and this one is its value to
+# an agent that has asked. Read the scope, not only the number.
 #
 # Every scenario improves except boundary, which is 0.1000 in both arms --
 # and boundary is 10 sessions, so read it as "no evidence either way" rather
@@ -263,10 +297,10 @@ USE_CONFIDENCE_WEIGHTING = False
 # W_POPULARITY is 0.008, an order of magnitude below W_MATCH, exactly as
 # CP 12.4 requires. Raising it pays enormously on this benchmark:
 #
-#   W_POPULARITY   0.008 -> TS 0.244   (shipped)
-#                  0.02  -> TS 0.330
-#                  0.05  -> TS 0.483
-#                  0.10  -> TS 0.558
+#   W_POPULARITY   0.008 -> TS 0.727   (shipped)
+#                  0.02  -> TS 0.765
+#                  0.05  -> TS 0.807
+#                  0.10  -> TS 0.829
 #
 # At 0.10 popularity equals W_MATCH and a bestseller can cancel a satisfied
 # constraint outright -- which is precisely the collapse CP 12.4 forbids. The
@@ -278,9 +312,9 @@ USE_CONFIDENCE_WEIGHTING = False
 #
 # OFF: the popularity term is not computed. That is no longer "exactly the
 # pre-Phase-12 score" -- it is the rest of the CURRENT pipeline without this
-# term, which is 0.187711 rather than the 0.134566 the Phase 12 ladder
-# recorded. The ladder figure lives in tools/phase7_ablation.py, where it is
-# labelled as history.
+# term, which is 0.704106 today (0.187711 before Phase 15, 0.134566 when the
+# ladder ended at Phase 12). The ladder figure lives in
+# tools/phase7_ablation.py, where it is labelled as history.
 USE_POPULARITY = True
 
 # Where ``rank`` reads the catalog popularity scale out of ``Context.derived``.

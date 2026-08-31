@@ -185,17 +185,33 @@ def main() -> None:
           f"{_rate(sum(first_right.values()), sum(first_total.values())):>20}"
           f"{_rate(sum(all_right.values()), sum(all_total.values())):>20}")
 
-    # Turn 1 is the only turn that carries shopper information: the agent never
-    # asks a question, so every later customer reply is a harness non-answer.
-    # Splitting it out shows how much of any "accuracy" figure is just that.
+    # Turn 1 is the only turn whose label can be TRUSTED, and the reason
+    # changed at Phase 15. It used to be that turn 1 was the only turn
+    # carrying shopper information at all -- the agent never asked, so every
+    # later reply was a harness non-answer. Now the agent asks and the
+    # shopper answers, and the later turns carry real preferences.
+    #
+    # That makes the label wrong rather than the classifier. ``scenario_type``
+    # is a fixed property of the sample; the MODE is defined to follow the
+    # current state (CP 9.4: "a browsing session becomes buying the moment
+    # specifics arrive"). A browsing session that has just disclosed
+    # "polyester" IS buying, and scoring that as a miss scores the classifier
+    # against a label it was explicitly designed to stop agreeing with.
+    #
+    # So the per-turn column below is not an error rate after turn 1. Read
+    # turn 1, and read the rest as "how often does the mode still match the
+    # sample's opening character", which is a different and much less
+    # interesting question.
     later_total = sum(turns_total.values()) - sum(first_total.values())
     later_right = sum(turns_right.values()) - sum(first_right.values())
     print(f"\nturn 1 vs the rest: turn 1 "
           f"{_rate(sum(first_right.values()), sum(first_total.values()))}   "
           f"turns 2+ {_rate(later_right, later_total)}")
-    print("  turns 2+ carry no shopper information -- the agent asks nothing, "
-          "so every\n  reply is a harness non-answer. They test stability, "
-          "not classification.")
+    print("  turns 2+ are NOT an error rate. Since Phase 15 the agent asks "
+          "and the\n  shopper discloses, so a browsing session that has just "
+          "named a material\n  is buying by CP 9.4 -- the scenario label "
+          "stops describing the state,\n  which is what the label was "
+          "designed to stop describing. Read turn 1.")
 
     misses = [
         (scenario_of[o["session_id"]], o["turn"], o["mode"], o["message"])
@@ -226,14 +242,19 @@ def main() -> None:
     distinct = sum(len(v) for v in openings.values())
     print(f"\nthe public set contains {distinct} distinct opening messages "
           f"built from {len(scenarios)} templates\n"
-          "(local_evaluator.initial_message), and every non-opening turn is a "
-          "harness\nnon-answer. A high score here is TEMPLATE COVERAGE, not "
-          "evidence of\ngeneralization -- read it as 'no known case is "
-          "misread', nothing stronger.")
+          "(local_evaluator.initial_message). The TURN 1 column is therefore "
+          "TEMPLATE\nCOVERAGE, not evidence of generalization -- read it as "
+          "'no known opening is\nmisread', nothing stronger. Non-opening "
+          "turns carried nothing until Phase 15;\nsince clarification they "
+          "carry real disclosures, which is why the per-turn\ncolumn fell "
+          "and why it is not an error rate.")
 
     print(f"\nconfig: {config_guard.describe()}")
     print("note: the mode gates nothing in the shipped agent -- it is measured "
-          "here, not tuned\n      against. Phase 15 is the first consumer.")
+          "here, not tuned\n      against. Phase 15 was expected to be the "
+          "first consumer and is not: on a\n      harness where asking costs "
+          "nothing, a mode gate on the ask decision could\n      only "
+          "subtract. See clarify.choose.")
 
 
 if __name__ == "__main__":

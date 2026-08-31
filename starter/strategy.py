@@ -39,12 +39,24 @@ first three are what "concrete specifics win" means -- a recognised spec beats
 The cues below are ordinary English, not the evaluator's phrasing -- keying
 on simulator strings would classify the public set well and generalize to
 nothing. Accuracy against the live dialogue is measured, not asserted:
-``python3 -m tools.phase9_mode_accuracy``. It is currently 100% on all 200
-sessions, which -- as that tool says in its own output -- is template coverage
-on four opening templates, not evidence of generalization.
+``python3 -m tools.phase9_mode_accuracy``. On TURN 1 it is 100% across all
+200 sessions, which -- as that tool says in its own output -- is template
+coverage on four opening templates, not evidence of generalization.
 
-Nothing in the shipped agent reads the mode yet (see ``agent.respond``);
-Phase 15 is the first consumer.
+Per-turn across the whole dialogue it reads 64.3%, and that number is not an
+error rate. Before Phase 15 every turn after the first was a harness
+non-answer, so the figure was 100% by having nothing to disagree with. Now
+the agent asks and the shopper discloses, and a browsing session that has
+just named a material is classified BUYING -- which is CP 9.4 working
+exactly as specified, scored as a miss against a ``scenario_type`` label that
+describes how the session opened rather than what the shopper has since said.
+The classifier is being marked against the thing it was designed to stop
+agreeing with.
+
+Nothing in the shipped agent reads the mode. Phase 15 was expected to be the
+first consumer and deliberately is not: see ``agent.respond`` and
+``clarify.choose`` for why a mode gate on the ask decision would have been a
+knob that changes nothing on a harness where asking is free.
 """
 
 from __future__ import annotations

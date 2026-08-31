@@ -68,21 +68,25 @@ class ModuleListCompletenessTest(unittest.TestCase):
         # Phase 13/14. Phase 14 shipped it, and the test kept passing only
         # because its own precondition failed first -- one assertion away from
         # writing over the real module and then unlink()ing it in `finally`.
-        # The placeholder must therefore be a name the package does NOT have,
-        # and the precondition is what keeps the cleanup safe. If Phase 15
-        # ships `clarify.py`, move this to the next unused name.
+        # It was then moved to `clarify.py`, which Phase 15 shipped, and the
+        # precondition caught it a second time.
+        #
+        # Twice is a pattern, so the name is no longer a roadmap module at
+        # all: a probe name nothing will ever ship cannot collide, and the
+        # precondition stops being the thing standing between this test and
+        # deleting real code. The assertion below stays as the backstop.
         package = Path(starter.__file__).resolve().parent
-        new_module = package / "clarify.py"
+        new_module = package / "_config_guard_probe.py"
         self.assertFalse(
             new_module.exists(),
             f"{new_module.name} now exists -- point this test at a module the "
             "package does not have, or the cleanup below deletes real code",
         )
-        new_module.write_text("USE_CLARIFY = True\n", encoding="utf-8")
+        new_module.write_text("USE_PROBE = True\n", encoding="utf-8")
         try:
             with self.assertRaises(SystemExit) as caught:
                 config_guard.assert_module_list_is_complete()
-            self.assertIn("clarify", str(caught.exception))
+            self.assertIn("_config_guard_probe", str(caught.exception))
             # And it must also trip the flag guard, which calls it.
             with self.assertRaises(SystemExit):
                 config_guard.assert_all_flags_pinned(

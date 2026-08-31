@@ -22,12 +22,20 @@ C        SCOPE.  Both terms of the headline "120 in-pool losses = 3.2x the
          alongside 51 with the difference broken out, and the oracle is
          scoped to the 51.
 
-         The 51 is retrieval's own and does not move. The in-pool losses do:
-         a better ranker converts some of them, and Phase 14 took the pair to
-         92 and 1.8x. Section 1 prints the live figures; the ones written
-         here are dated on purpose rather than maintained, because a
-         docstring that quotes a moving number is the exact failure D's
-         Phase 14 Finding 3 catalogued.
+         Even the 51 moves, and Phase 15 is why. It is retrieval's own
+         number and nothing downstream can change it -- but the QUERY is not
+         downstream. Once the agent asks and the shopper answers, retrieval
+         is searching on real constraints: 6 sessions never retrieve the
+         target rather than 51, in-pool conversion is 87.1% rather than
+         38.3%, and the conversion ratio is 4.2x on a collapsed base rather
+         than 1.8x. Section 1 prints the live figures; the ones written here
+         are dated on purpose rather than maintained, because a docstring
+         that quotes a moving number is the exact failure D's Phase 14
+         Finding 3 catalogued.
+
+         Read the direction, not the ratio: 4.2x looks worse than 1.8x and
+         is much better news. Retrieval's headroom fell from +0.2550 recall
+         to +0.0300; the ratio rose because its denominator nearly vanished.
 
 B1/D-R3  CEILING.  "N of 200 never retrieved" is a fact about CANDIDATE
          RECALL -- +0.2550 recall at C's corrected scope above, +0.19 at the
@@ -390,8 +398,10 @@ def first_scoring_turn(sample: dict, products: dict[str, dict]) -> int:
     retrieval with pool hits that could never have been scored, which
     understates the number of sessions retrieval actually loses (38 -> 51)
     and overstates the conversion failure relative to it (3.2x -> 2.1x at
-    the time; 1.8x on the live pipeline, which section 1 prints -- the ratio
-    falls as the ranker converts more of the in-pool losses).
+    the time). Section 1 prints the live pair, which has moved twice since:
+    1.8x after Phase 14 and 4.2x after Phase 15, the second because
+    clarification collapsed the denominator rather than because ranking got
+    worse.
 
     The override turn is read through the evaluator's own
     ``materialize_hidden_fields``, not re-derived: it comes from a seeded

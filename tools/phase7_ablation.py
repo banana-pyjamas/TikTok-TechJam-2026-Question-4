@@ -42,24 +42,31 @@ DATASET = "data/public_set.jsonl"
 # later one merely compensates for. Run 3b isolates that.
 RUNS = [
     # label, USE_STATE, USE_MULTI_ROUTE, USE_CONSTRAINT_RANKING,
-    # USE_POPULARITY, USE_SEMANTIC_RERANK
-    ("Run 0   baseline", False, False, False, False, False),
-    ("Run 1   +state", True, False, False, False, False),
-    ("Run 2   +retrieval", True, True, False, False, False),
-    ("Run 3   +ranking", True, True, True, False, False),
-    ("Run 4   +popularity", True, True, True, True, False),
-    ("Run 5   +rerank", True, True, True, True, True),
-    ("Run 3b  ranking, BM25 pool", True, False, True, False, False),
+    # USE_POPULARITY, USE_SEMANTIC_RERANK, USE_CLARIFICATION
+    ("Run 0   baseline", False, False, False, False, False, False),
+    ("Run 1   +state", True, False, False, False, False, False),
+    ("Run 2   +retrieval", True, True, False, False, False, False),
+    ("Run 3   +ranking", True, True, True, False, False, False),
+    ("Run 4   +popularity", True, True, True, True, False, False),
+    ("Run 5   +rerank", True, True, True, True, True, False),
+    ("Run 6   +clarification", True, True, True, True, True, True),
+    ("Run 3b  ranking, BM25 pool", True, False, True, False, False, False),
 ]
 
 # The one run that is not a rung of the ladder, named so the table can tell
 # them apart without counting rows.
 OFF_LADDER = "Run 3b  ranking, BM25 pool"
 
-# Run 5 is the stack that SHIPS. Popularity and the reranker each get their
-# own rung rather than riding with USE_CONSTRAINT_RANKING because they are the
-# two largest single contributions in the ladder, and folding either into
-# another rung would hide that.
+# Run 6 is the stack that SHIPS. Popularity, the reranker and clarification
+# each get their own rung rather than riding with USE_CONSTRAINT_RANKING
+# because they are the three largest single contributions in the ladder, and
+# folding any of them into another rung would hide that.
+#
+# Clarification is LAST on purpose, and the order is not cosmetic. Every rung
+# below it makes the agent better at answering what it was told; this one
+# changes what it gets told. Put earlier, it would raise every later rung's
+# apparent value by handing it a richer dialogue, and the ladder would
+# attribute clarification's gain to whatever sat above it.
 
 # Every ablation flag in the WHOLE package, so a run pins the entire
 # configuration. Scoped package-wide via ``tools.config_guard`` after D-N2:
@@ -78,6 +85,8 @@ PINNED_FLAGS = {
     # out is precisely the D-N2 failure this guard exists for, and the guard
     # duly refused to run until it was listed.
     ("reranker", "USE_SEMANTIC_RERANK"),
+    # Phase 15, added with the flag for the same reason.
+    ("clarify", "USE_CLARIFICATION"),
 }
 
 
@@ -94,12 +103,13 @@ def main() -> None:
 
     results = []
     for (label, use_state, use_routes, use_ranking, use_popularity,
-         use_rerank) in RUNS:
+         use_rerank, use_clarify) in RUNS:
         config_guard.set_flag("agent", "USE_STATE", use_state)
         config_guard.set_flag("agent", "USE_MULTI_ROUTE", use_routes)
         config_guard.set_flag("agent", "USE_CONSTRAINT_RANKING", use_ranking)
         config_guard.set_flag("ranking", "USE_POPULARITY", use_popularity)
         config_guard.set_flag("reranker", "USE_SEMANTIC_RERANK", use_rerank)
+        config_guard.set_flag("clarify", "USE_CLARIFICATION", use_clarify)
         config_guard.set_flag("ranking", "USE_PROFILE", False)
         # Pinned to its COMMITTED value, not to the rung. This ladder measures
         # the stack that ships, and Phase 11 weighting ships OFF (measured
@@ -184,8 +194,10 @@ def main() -> None:
         ("ranking | bm25 pool", "Run 1   +state", "Run 3b  ranking, BM25 pool"),
         ("ranking | union pool  *", "Run 2   +retrieval", "Run 3   +ranking"),
         ("popularity | full stack  *", "Run 3   +ranking", "Run 4   +popularity"),
-        ("rerank | full stack  *", "Run 4   +popularity", "Run 5   +rerank"),
-        ("whole shipped stack", "Run 0   baseline", "Run 5   +rerank"),
+        ("rerank | full stack", "Run 4   +popularity", "Run 5   +rerank"),
+        ("clarification | full stack  *", "Run 5   +rerank",
+         "Run 6   +clarification"),
+        ("whole shipped stack", "Run 0   baseline", "Run 6   +clarification"),
     ]
     for label, before_label, after_label in pairs:
         test = mcnemar(hits_by_sample(by_label[before_label]),

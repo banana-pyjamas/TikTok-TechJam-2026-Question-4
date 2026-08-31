@@ -113,8 +113,8 @@ DEFAULT_ROUTES = ("bm25", "category")
 # contribute unique candidates through a union. The UNION is the question,
 # and it is worse rather than neutral: -11 sessions at @50 (2/13 discordant,
 # p = 0.0074) and -11 at @100 (1/12, p = 0.0034), no verdict at @300 (1/2).
-# The lexical route adds 111.1 unique candidates per turn and pushes cap loss
-# from 139.3 to 250.4 discarded candidates per turn; what it displaces is
+# The lexical route adds 113.3 unique candidates per turn and pushes cap loss
+# from 126.4 to 239.7 discarded candidates per turn; what it displaces is
 # worth more than what it adds. OFF on measurement, not on principle.
 #
 # The recall and McNemar rows above are pure retrieval and do not move when
@@ -122,7 +122,9 @@ DEFAULT_ROUTES = ("bm25", "category")
 # over the live dialogue, and the dialogue changes when the ranker changes.
 # They read 146 and 257 until Phase 14 moved them and nothing noticed, which
 # is the whole of D's Phase 14 Finding 3: this repo's guards check assertions
-# and are blind to prose. `python3 -m tools.phase13_dense_gate` regenerates
+# and are blind to prose. Phase 15 moved them again, which is what "moves
+# with the pipeline" means -- the dialogue is shorter now, so fewer turns
+# accumulate a wide pool. `python3 -m tools.phase13_dense_gate` regenerates
 # both, and moving the pipeline means re-running it.
 #
 # 2  WHAT WAS NOT MEASURED: A TRAINED SEMANTIC ENCODER

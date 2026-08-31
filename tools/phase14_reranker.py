@@ -59,11 +59,16 @@ from tools.summaries import percentiles
 CATALOG = "data/catalog.jsonl"
 DATASET = "data/public_set.jsonl"
 
-# The score with USE_SEMANTIC_RERANK OFF: the Phase 12 pipeline exactly. A
-# fixed historical reference, NOT the committed score -- the committed score is
-# now the ON arm, and it lives in config_guard. Keeping the two apart is the
-# whole lesson of phase10/phase11, which each pinned "the committed score" as a
-# private literal and then spent two phases raising on their own staleness.
+# The score this flag's OFF position produced AT PHASE 14: the Phase 12
+# pipeline exactly. A fixed HISTORICAL reference, NOT the committed score --
+# the committed score is now the ON arm and it lives in config_guard. Keeping
+# the two apart is the whole lesson of phase10/phase11, which each pinned "the
+# committed score" as a private literal and then spent two phases raising on
+# their own staleness.
+#
+# It is dated, not maintained. Phase 15 moved the OFF arm (clarification
+# changes what the shopper says on every turn, reranker or no reranker), so
+# section 1 now REPORTS the difference instead of exiting on it.
 PRE_RERANK_TECHNICAL_SCORE = 0.182258
 
 
@@ -368,22 +373,31 @@ def main() -> None:
     # never moves again. COMMITTED_TECHNICAL_SCORE is the score of what ships,
     # which is now the ON arm. (phase12_popularity pins its OFF arm the same
     # way, for the same reason.)
+    # ASSERTED: the ON arm reproduces the committed score, which is what makes
+    # everything below a measurement of the shipped pipeline.
+    #
+    # REPORTED, NEVER ASSERTED: the OFF arm against the pre-Phase-14 score.
+    # It was exact until Phase 15, and then stopped being -- "this pipeline
+    # minus reranking" is not a constant, it moves with everything upstream,
+    # and clarification changed what the shopper says on every turn. The first
+    # version of this block asserted BOTH and would have exited here, which is
+    # the staleness-failure phase10 and phase11 each spent two phases in and
+    # which phase12 had already been corrected for. Same fix, one phase later.
     committed = config_guard.COMMITTED_TECHNICAL_SCORE
-    checks = (
-        ("OFF reproduces the pre-Phase-14 pipeline", off, PRE_RERANK_TECHNICAL_SCORE),
-        ("ON reproduces the committed score       ", on, committed),
-    )
-    failed = []
-    for label, result, expected in checks:
-        actual = result["recommended_technical_score"]
-        exact = abs(actual - expected) <= 1e-9
-        print(f"   {label} {expected}   {'PASS' if exact else f'FAIL ({actual})'}")
-        if not exact:
-            failed.append(label.strip())
-    if failed:
+    actual_on = on["recommended_technical_score"]
+    exact = abs(actual_on - committed) <= 1e-9
+    print(f"   ON reproduces the committed score        {committed}   "
+          f"{'PASS' if exact else f'FAIL ({actual_on})'}")
+    if not exact:
         raise SystemExit(
-            "these arms no longer reproduce their pinned scores, so nothing "
-            "below is a controlled comparison: " + "; ".join(failed))
+            "the ON arm no longer reproduces the committed score, so this is "
+            "not a measurement of the shipped pipeline")
+    actual_off = off["recommended_technical_score"]
+    drift = actual_off - PRE_RERANK_TECHNICAL_SCORE
+    print(f"   OFF vs the pre-Phase-14 pipeline         "
+          f"{PRE_RERANK_TECHNICAL_SCORE}   "
+          f"{'exact' if abs(drift) <= 1e-9 else f'{actual_off} ({drift:+.6f})'}"
+          f"   [reported, not asserted]")
     print("   With the flag OFF the reranker is not imported into the hot path,")
     print("   the ranked list is not deepened, and no scorer is built -- the")
     print("   turn is byte-for-byte the Phase 12 pipeline.")

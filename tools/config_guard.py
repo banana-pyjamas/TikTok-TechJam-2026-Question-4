@@ -75,6 +75,7 @@ import starter
 STARTER_MODULES = (
     "agent",
     "catalog_meta",
+    "clarify",
     "contracts",
     "popularity",
     "profile",
@@ -103,6 +104,9 @@ COMMITTED_FLAGS: dict[tuple[str, str], Any] = {
     # `starter.reranker`, not through a name imported into `agent`, so that
     # `set_flag` actually reaches the branch it governs.
     ("reranker", "USE_SEMANTIC_RERANK"): True,
+    # Phase 15. Same note as the reranker above: `agent.respond` reads this
+    # through `starter.clarify`, so `set_flag` reaches the branch it governs.
+    ("clarify", "USE_CLARIFICATION"): True,
 }
 
 # Not flags, but they decide what gets measured just as hard. ``DEFAULT_ROUTES``
@@ -142,6 +146,15 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
     # reach, and the budget decides whether a slow scorer's answer counts.
     ("reranker", "RERANK_TOP_N"): 50,
     ("reranker", "RERANK_BUDGET_MS"): 150.0,
+    # Phase 15. The window a question's value is judged over, the quantile
+    # grid for the one continuous attribute, and the bar a specific question
+    # must clear to be preferred to the open one. All three decide WHICH
+    # question gets asked, and the answer is what the rest of the session is
+    # built on -- so they move the measured score harder than any weight in
+    # this registry.
+    ("clarify", "ASK_POOL_DEPTH"): 50,
+    ("clarify", "PRICE_BUCKETS"): 4,
+    ("clarify", "ASK_VALUE_FLOOR"): 0.10,
 }
 
 
@@ -160,7 +173,7 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
 # historical reference rather than the committed one.)
 #
 # Moving the committed score means updating this line in the same change.
-COMMITTED_TECHNICAL_SCORE = 0.243930
+COMMITTED_TECHNICAL_SCORE = 0.726726
 
 
 def _module(name: str):

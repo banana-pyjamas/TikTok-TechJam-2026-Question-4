@@ -19,7 +19,7 @@ from starter.reliability import match_reliability, slot_coverage
 # COPY here that the ablation could never flip -- the flag would read ON in
 # the guard's report and OFF in the code it governs. Phase 12 closed that
 # exact hole once already; it is not being reopened one module over.
-from starter import reranker
+from starter import clarify, reranker
 from starter.retrieval import (DEFAULT_ROUTES, POOL_LIMIT, bm25_route,
                                fuse, retrieve)
 from starter.state import update_state
@@ -166,13 +166,28 @@ def _rank(candidates: list[Candidate], top_k: int) -> RankingResult:
     return RankingResult(ranked=ordered, diagnostics=diagnostics)
 
 
-def _to_response(result: RankingResult, top_k: int) -> dict:
-    """CP 1.6 - RankingResult -> evaluator-compatible respond() payload.
+def _to_response(result: RankingResult, top_k: int,
+                 ask: str | None = None) -> dict:
+    """CP 1.6 / CP 15.4 - RankingResult -> evaluator ``respond()`` payload.
 
-    ``message`` is the baseline string, ``ask_attribute`` is ``None`` (no
-    clarification yet), and ``recommendations`` is at most 10
-    ``{"parent_asin": ...}`` entries in ranked order -- the frozen maximum
-    is enforced here regardless of ``top_k``.
+    ``message`` is the baseline string and ``recommendations`` is at most 10
+    ``{"parent_asin": ...}`` entries in ranked order -- the frozen maximum is
+    enforced here regardless of ``top_k``.
+
+    CP 15.4 IS STRUCTURAL HERE, not a rule this function follows. Both fields
+    are built from the SAME ranked result in the same expression, so there is
+    no code path that returns a question without a recommendation list, and
+    none that suppresses recommendations because the agent decided to ask
+    something. That matters more than it sounds: the evaluator scores the
+    recommendations of EVERY turn, so an agent that asked instead of answering
+    would score zero on the turn it asked, and the natural chat-shaped
+    implementation -- "if unsure, ask; else recommend" -- is exactly that bug.
+
+    ``ask`` defaults to ``None``, which is both the CP 15.1 no-ask baseline
+    and the value every caller passed before Phase 15. It is validated against
+    the contract enum by ``clarify.choose``; this function does not re-check
+    it, because a second copy of the enum is a second thing to keep in step
+    (CP 15.3 lives in one place, with a test that reads the organizer's JSON).
     """
     recommendations = [
         {"parent_asin": candidate.parent_asin}
@@ -180,7 +195,7 @@ def _to_response(result: RankingResult, top_k: int) -> dict:
     ]
     return {
         "message": _RESPONSE_MESSAGE,
-        "ask_attribute": None,
+        "ask_attribute": ask,
         "recommendations": recommendations,
         "usage": {"prompt_tokens": 0, "completion_tokens": 0},
     }
@@ -199,6 +214,8 @@ class Agent:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._states: dict[str, SessionState] = {}
+        # Phase 15, per session, created by ``reset`` alongside the state.
+        self._clarify: dict[str, clarify.ClarificationLedger] = {}
         self._build_index()
         # Phase 11 (CP 11.2). A property of the frozen catalog, so it is
         # computed once per agent and never per turn.
@@ -285,6 +302,13 @@ class Agent:
             session_id=session_id,
             user_profile=copy.deepcopy(user_profile),
         )
+        # Phase 15. The agent's own side of the conversation -- what it has
+        # asked, and what turned out to be exhausted. Reset with the session
+        # for the same reason the state is: a re-``reset`` must start clean, and
+        # a ledger that outlived its session would carry one shopper's dead
+        # questions into the next one's. Deliberately NOT inside SessionState;
+        # see ``clarify.ClarificationLedger`` for why.
+        self._clarify[session_id] = clarify.ClarificationLedger()
 
     def respond(
         self,
@@ -296,14 +320,22 @@ class Agent:
         """One turn end to end.
 
         State manager (single writer) -> Context -> multi-route retrieval
-        UNION (Phase 5) -> constraint-aware ranking (Phase 6) -> payload.
-        Retrieval and ranking never touch state.
+        UNION (Phase 5) -> constraint-aware ranking (Phase 6) -> semantic
+        rerank (Phase 14) -> clarification (Phase 15) -> payload. Retrieval,
+        ranking and clarification never touch state.
         """
         if session_id not in self._states:
             raise RuntimeError("reset must be called before respond")
         state = self._states[session_id]
         if USE_STATE:
             update_state(state, user_message, turn)
+        # CP 15.7, and it must run BEFORE this turn's question is chosen: this
+        # message is the answer to the LAST one, and an attribute the shopper
+        # has just declined must not be a candidate again a few lines below.
+        ledger = self._clarify.setdefault(
+            session_id, clarify.ClarificationLedger())
+        if clarify.USE_CLARIFICATION:
+            ledger.observe(user_message)
         context = _build_context(session_id, user_message, turn, state)
         # CP 11.2 -- per-slot Match Reliability reaches ranking through the
         # generic `derived` bag, not a new frozen field (contracts rule).
@@ -316,8 +348,15 @@ class Agent:
         # and computing a value nothing reads is the same "mechanism that
         # changes nothing" this phase deleted USE_ADAPTIVE_STRATEGY for
         # (D-N4). starter.strategy stays: it is pure, tested, and measured by
-        # tools/phase9_mode_accuracy.py. Phase 15 wires it in HERE, when the
-        # clarification policy actually reads the mode.
+        # tools/phase9_mode_accuracy.py.
+        #
+        # Phase 15 was expected to be its first consumer and is NOT. The mode
+        # would gate how hard to push for a clarification -- and on this
+        # harness there is no cost to asking, so a gate on it could only
+        # subtract. Wiring it in to honour the plan would be a knob that
+        # changes nothing, which is the same thing this comment already
+        # deleted USE_ADAPTIVE_STRATEGY for. See `clarify.choose` for where
+        # the second gate belongs when a deployment gives questions a price.
 
         if USE_MULTI_ROUTE:
             pool = retrieve(self.connection, context, POOL_LIMIT, DEFAULT_ROUTES)
@@ -348,4 +387,19 @@ class Agent:
                 reranker.safe_build_scorer(self.connection, pool, context))
         else:
             result = constraint_rank(pool, context, metadata, _effective_k(top_k))
-        return _to_response(result, top_k)
+
+        # Phase 15. Chosen from the RANKED head, after reranking, because the
+        # question is "what would split the answer I am about to give" -- and
+        # from `metadata`, which the ranking path has already looked up for
+        # this exact pool, so clarification adds no query to the turn.
+        #
+        # With the flag OFF this is `None` and the payload is byte-for-byte
+        # the Phase 14 one (CP 15.1). `ask` is never computed in that case:
+        # a no-op arm that still does the work is a no-op that can still be
+        # wrong, and the ablation would stop being free.
+        ask = None
+        if clarify.USE_CLARIFICATION:
+            ask = clarify.choose(context, ledger, result.ranked, metadata,
+                                 self._reliability)
+            ledger.record(ask)
+        return _to_response(result, top_k, ask)
