@@ -345,7 +345,7 @@ class Agent:
                 max(_effective_k(top_k), reranker.RERANK_TOP_N))
             result = reranker.rerank(
                 result, context,
-                reranker.build_scorer(self.connection, pool, context))
+                reranker.safe_build_scorer(self.connection, pool, context))
         else:
             result = constraint_rank(pool, context, metadata, _effective_k(top_k))
         return _to_response(result, top_k)

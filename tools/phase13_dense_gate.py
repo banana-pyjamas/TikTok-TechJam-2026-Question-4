@@ -17,9 +17,17 @@ C        SCOPE.  Both terms of the headline "120 in-pool losses = 3.2x the
          A target in the pool before then is a pool hit that could never have
          become a score. Measuring turn-level and override-aware
          (``first_scoring_turn``) moves the numbers to 51 sessions retrieval
-         loses and 107 in-pool losses -- ~2.1x, not 3.2x. Section 1 now leads
-         with that scope, states 38 alongside 51 with the difference broken
-         out, and the oracle is scoped to the 51.
+         loses and, at the time of that correction, 107 in-pool losses --
+         ~2.1x, not 3.2x. Section 1 now leads with that scope, states 38
+         alongside 51 with the difference broken out, and the oracle is
+         scoped to the 51.
+
+         The 51 is retrieval's own and does not move. The in-pool losses do:
+         a better ranker converts some of them, and Phase 14 took the pair to
+         92 and 1.8x. Section 1 prints the live figures; the ones written
+         here are dated on purpose rather than maintained, because a
+         docstring that quotes a moving number is the exact failure D's
+         Phase 14 Finding 3 catalogued.
 
 B1/D-R3  CEILING.  "N of 200 never retrieved" is a fact about CANDIDATE
          RECALL -- +0.2550 recall at C's corrected scope above, +0.19 at the
@@ -381,7 +389,9 @@ def first_scoring_turn(sample: dict, products: dict[str, dict]) -> int:
     This is the correction C caught. Counting pre-override turns credits
     retrieval with pool hits that could never have been scored, which
     understates the number of sessions retrieval actually loses (38 -> 51)
-    and overstates the conversion failure relative to it (3.2x -> 2.1x).
+    and overstates the conversion failure relative to it (3.2x -> 2.1x at
+    the time; 1.8x on the live pipeline, which section 1 prints -- the ratio
+    falls as the ranker converts more of the in-pool losses).
 
     The override turn is read through the evaluator's own
     ``materialize_hidden_fields``, not re-derived: it comes from a seeded

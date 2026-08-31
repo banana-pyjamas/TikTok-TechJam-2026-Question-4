@@ -238,6 +238,46 @@ class FreeTextEvidenceTest(unittest.TestCase):
         self.assertEqual(state.evidence, [])
 
 
+class RequestFramingIsNotEvidenceTest(unittest.TestCase):
+    """Words that frame the REQUEST are not the shopper's preference.
+
+    Same class as the override plumbing above ("actually", "ignore",
+    "earlier"), and stripped in the same place. The Phase 14 review found
+    that what was left behind -- `still`, `exploring`, `key`, `requirement`
+    -- was carrying 31% of the reranker's total scoring weight, because the
+    local evaluator writes every shopper turn from a fixed template and those
+    words therefore appear in almost every session while meaning nothing.
+
+    Stripping them is worth +0.0202 TS, and the direction is what makes it
+    safe: it removes the harness's fingerprint from the ranking signal rather
+    than fitting to it.
+    """
+
+    def test_the_browsing_opener_leaves_no_evidence(self) -> None:
+        # "I'm looking for X, but I'm still exploring." -- the shopper has
+        # named a category and volunteered nothing else. An evidence entry
+        # reading "still exploring" is an entry about the simulator.
+        state = _run("I'm looking for jacket, but I'm still exploring.")
+        self.assertEqual(_values(state, "category"), ["jacket"])
+        self.assertEqual(state.evidence, [])
+
+    def test_the_requirement_framing_is_dropped_but_the_requirement_is_not(self) -> None:
+        state = _run("I'm looking for jacket. A key requirement is: merino wool lining.")
+        normalized = " ".join(entry["normalized"] for entry in state.evidence)
+        self.assertNotIn("key", normalized.split())
+        self.assertNotIn("requirement", normalized.split())
+        self.assertIn("lining", normalized.split())
+
+    def test_what_matters_is_framing_too(self) -> None:
+        state = _run("For that, what matters is: reinforced toe.")
+        normalized = " ".join(entry["normalized"] for entry in state.evidence)
+        self.assertNotIn("matters", normalized.split())
+        self.assertIn("reinforced", normalized.split())
+
+    def test_a_framing_only_turn_stores_nothing(self) -> None:
+        self.assertEqual(_run("I'm still exploring options").evidence, [])
+
+
 class SingleWriterAndIsolationTest(unittest.TestCase):
     def test_turn_counter_advances(self) -> None:
         state = _run("jacket", "black", "leather")

@@ -11,6 +11,7 @@ CP 14.6 (the ON/OFF ablation) is measured on the real dataset by
 
 from __future__ import annotations
 
+import sys
 import time
 import unittest
 
@@ -18,7 +19,7 @@ from starter import reranker
 from starter.contracts import Candidate, Context, RankingResult, SessionState
 from starter.reranker import (OUTCOMES, RERANK_KEY, PoolTermScorer,
                               _evidence_terms, build_scorer,
-                              load_encoder_scorer, rerank)
+                              load_encoder_scorer, rerank, safe_build_scorer)
 
 
 def _candidates(*asins: str) -> list[Candidate]:
@@ -392,6 +393,120 @@ class BuildScorerTest(unittest.TestCase):
         # turn it should have skipped; it must only query when it will score.
         with self.assertRaises(Exception):
             build_scorer(None, _candidates("A"), _context(["strap"]))
+
+
+class BuildIsInsideTheFallbackTest(unittest.TestCase):
+    """CP 14.3/14.5 also cover a scorer that fails while being BUILT.
+
+    They did not until the Phase 14 review. ``agent.respond`` passed
+    ``build_scorer(...)`` as an ARGUMENT to ``rerank``, so it was evaluated
+    before ``rerank`` was entered and sat outside every fallback the phase
+    advertises. Loading a model is the step most likely to fail on a machine
+    with no weights, no network, or no memory -- and it was the one step with
+    no guard.
+    """
+
+    def test_a_raising_build_yields_no_scorer_rather_than_an_exception(self) -> None:
+        # The real failure shape: build_scorer queries the catalog, and this
+        # passes a connection that cannot be queried.
+        self.assertIsNone(
+            safe_build_scorer(None, _candidates("A"), _context(["strap"])))
+
+    def test_a_turn_survives_a_build_that_raises(self) -> None:
+        # End to end: the CP 14.5 path, reached from a broken build.
+        scorer = safe_build_scorer(None, _candidates("A"), _context(["strap"]))
+        result = rerank(_result("A", "B"), _context(["strap"]), scorer)
+        self.assertEqual(_asins(result), ["A", "B"])
+
+    def test_the_agent_calls_the_guarded_builder(self) -> None:
+        # The guard is only worth anything at the call site. A future edit
+        # back to the bare `build_scorer` puts the hole straight back.
+        from pathlib import Path
+
+        import starter.agent as agent_module
+
+        source = Path(agent_module.__file__).read_text(encoding="utf-8")
+        self.assertIn("reranker.safe_build_scorer(", source)
+        self.assertNotIn("reranker.build_scorer(", source)
+
+
+class ScorerNameIsNotTrustedTest(unittest.TestCase):
+    """A scorer must not be able to take a turn down by being ASKED ITS NAME.
+
+    ``getattr(scorer, "name", None)`` looks total and is not: ``name`` can be
+    a property, and a property can raise. That call sat above ``rerank``'s
+    try block.
+    """
+
+    class _NameRaises:
+        @property
+        def name(self):
+            raise RuntimeError("model metadata unavailable")
+
+        def order(self, parent_asins, context, deadline):
+            return list(reversed(parent_asins))
+
+    def test_a_raising_name_does_not_lose_the_turn(self) -> None:
+        context = _context()
+        result = rerank(_result("A", "B"), context, self._NameRaises())
+        self.assertEqual(_asins(result), ["B", "A"])
+        self.assertIsNone(context.derived[RERANK_KEY]["scorer"])
+
+    def test_a_non_string_name_is_reported_as_none(self) -> None:
+        scorer = _Scorer(["B", "A"])
+        scorer.name = 17
+        context = _context()
+        rerank(_result("A", "B"), context, scorer)
+        self.assertIsNone(context.derived[RERANK_KEY]["scorer"])
+
+
+class PoolTermScorerIsSeedIndependentTest(unittest.TestCase):
+    """The score is a float SUM, and float addition is not associative.
+
+    Iterating the query terms as a SET made the last bits of two near-equal
+    scores depend on PYTHONHASHSEED, so a real turn reordered ranks 26-28 on
+    42 of 400 seeds. It never reached the scored top 10 -- but the module
+    docstring claims determinism, and a claim that holds only outside the
+    visible window is not the claim.
+    """
+
+    class _OrderedSet(set):
+        """A set that iterates in a caller-chosen order.
+
+        Standing in for what PYTHONHASHSEED does to a real set, but
+        deterministically -- the point is not to reproduce one seed's order,
+        it is that NO iteration order of the query terms may reach the
+        arithmetic.
+        """
+
+        def __init__(self, items) -> None:
+            super().__init__(items)
+            self._items = list(items)
+
+        def __iter__(self):
+            return iter(self._items)
+
+    def test_the_terms_reach_the_arithmetic_in_a_fixed_order(self) -> None:
+        """The invariant, tested where it is decided rather than downstream.
+
+        Asserting on a REORDERED RESULT would test the wrong interpreter.
+        CPython 3.12's ``sum`` uses Neumaier compensation, which hides most
+        associativity failures; 3.9 -- the version this submission is
+        certified on, and the one the 42-of-400-seeds observation came from
+        -- does not. So the test asserts the property that makes the
+        arithmetic order-free on every version: the terms are handed to it
+        sorted, whatever order the set happened to iterate in.
+        """
+        terms = ["zebra", "alpha", "mid", "beta"]
+        scorer = PoolTermScorer({"pool_size": 100, "terms": {}}, {})
+        scorer.query_terms = lambda context: self._OrderedSet(terms)  # type: ignore[method-assign]
+        seen: list[str] = []
+        original = scorer.weight
+        scorer.weight = lambda term: (  # type: ignore[method-assign]
+            seen.append(term) or original(term) or 1.0)
+
+        scorer.order(["A"], None, float("inf"))
+        self.assertEqual(seen, sorted(terms))
 
 
 if __name__ == "__main__":

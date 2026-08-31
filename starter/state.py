@@ -100,6 +100,43 @@ _OVERRIDE_PLUMBING = {
     "nevermind", "disregard", "what", "need", "needed",
 }
 
+# REQUEST-FRAMING words: they describe the act of shopping or of stating a
+# requirement, never the product. Same class as _OVERRIDE_PLUMBING above and
+# filtered in the same place -- that set was written when the override
+# template was the only framing anyone had looked at, and these are the words
+# the other templates leave behind.
+#
+# THIS IS A SIMULATOR ARTIFACT, AND STRIPPING IT IS THE ANTI-ARTIFACT MOVE.
+# The local evaluator writes shopper turns from fixed templates -- "...but I'm
+# still exploring.", "A key requirement is:", "For that, what matters is:" --
+# so `still`, `exploring`, `key`, `requirement` and `matters` appear in the
+# shopper's "own words" in almost every session while carrying no preference
+# at all. Left in, they reach starter/reranker.py as query terms, get a high
+# in-pool IDF for being rare in the catalog, and rank candidates on which
+# product description happens to contain the word "still". That was 31% of
+# the reranker's total applied weight (D Phase 14 review, Finding 2), and
+# `still` alone was 8.6x the top real product word.
+#
+# Three phases of this project banked a metric that measured the simulator.
+# This is the first time one COST score -- removing the framing is worth
+# +0.0202 TS -- and the direction is what makes it safe to take: it deletes
+# the harness's fingerprint from the ranking signal rather than fitting to it.
+# A real shopper never says these words either, so nothing here depends on
+# the private set using the same templates.
+#
+# Generic phrasing, not a transcription: siblings of each observed word are
+# included so a reworded template does not reopen the same hole.
+_REQUEST_FRAMING = {
+    "still", "exploring", "explore", "browsing", "browse", "shopping",
+    "considering", "consider", "undecided", "deciding",
+    "key", "requirement", "requirements", "criteria", "matters", "matter",
+    "important", "priority", "prioritize", "essential",
+    "recommend", "recommendation", "recommendations", "suggest",
+    "suggestion", "suggestions", "options", "option",
+    "something", "anything", "everything", "help",
+}
+
+
 def is_non_answer(message: object) -> bool:
     """True when a turn declines to add information rather than stating a
     preference -- "ask me about one specific attribute", "no preference".
@@ -907,9 +944,10 @@ def update_evidence(
     """CP 2.8 / CP 3.6 - keep residual free-text as distilled evidence.
 
     ``normalized`` is the DISTILLED content: message tokens minus override
-    cues, override-plumbing words, slot-marker words, and every extracted
-    slot value. So an entry never contains a structured constraint token --
-    superseding ``leather`` cannot touch an entry that only says
+    cues, override-plumbing words, request-framing words, slot-marker words,
+    and every extracted slot value. So an entry never contains a structured
+    constraint token -- superseding ``leather`` cannot touch an entry that
+    only says
     ``winter hiking`` (B Phase 3 blocker fix). An override message is not
     skipped wholesale: its genuine residual ("actually denim for winter
     hiking" -> ``winter hiking``) is retained.
@@ -930,6 +968,7 @@ def update_evidence(
     consumed: set[str] = (
         set(_EVIDENCE_MARKER_TOKENS)
         | _OVERRIDE_PLUMBING
+        | _REQUEST_FRAMING
         | _STRONG_NEGATIONS
         | _ADJACENT_NEGATIONS
     )

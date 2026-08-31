@@ -32,6 +32,23 @@ committed constants   values that are not flags but still determine what is
                       (``tools/phase9_retrieval_evidence.py`` swaps the route
                       table) restores it itself (D-P4).
 
+WHAT THIS GUARD DOES NOT COVER, STATED SO THE NEXT PHASE PLANS FOR IT
+
+Prose. Every check here is an ASSERTION about a value in memory or in an AST,
+and the numbers that go stale in this repository are mostly in comments. Phase
+14 moved the popularity ablation (``ranking.py``: OFF 0.134566 -> 0.187711,
+McNemar 10/0 -> 13/0, the whole W_POPULARITY sweep), the cap-loss pair in
+``retrieval.py``, and the conversion ratio in ``phase13_dense_gate``'s
+docstring -- and every tool still exited 0, because not one of those numbers
+is asserted anywhere (D Phase 14 review, Finding 3). The amended "re-run every
+tool" method catches a stale assertion and is blind to a stale sentence.
+
+There is no mechanical fix here that is not a registry of literals, which is
+the maintained-expectation shape this module exists to avoid. So the
+convention instead: any comment quoting a number that MOVES WITH THE PIPELINE
+names the tool that regenerates it, and a checkpoint's method includes reading
+those blocks. The three sites above now say so in as many words.
+
 Usage::
 
     from tools import config_guard
@@ -143,7 +160,7 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
 # historical reference rather than the committed one.)
 #
 # Moving the committed score means updating this line in the same change.
-COMMITTED_TECHNICAL_SCORE = 0.223740
+COMMITTED_TECHNICAL_SCORE = 0.243930
 
 
 def _module(name: str):

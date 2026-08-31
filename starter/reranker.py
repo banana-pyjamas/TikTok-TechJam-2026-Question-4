@@ -7,8 +7,10 @@ the target into the pool at the BOTTOM was worth +0.0000 TS, getting it to the
 HEAD +0.2419. The problem is ORDER, and this file is the layer that reorders.
 
 (Those are the pre-Phase-14 figures, quoted as the motivation they were. With
-this stage ON the same gate now reports 53/149 converting and 106 rather than
-176 at rank 11-50 -- which is this file having done its job. The retrieval
+this stage ON the same gate now reports 57/149 converting and 106 rather than
+176 at rank 11-50 -- which is this file having done its job. Both of those
+move whenever the ranker moves, so they are regenerated rather than
+remembered: `python3 -m tools.phase13_dense_gate` prints them. The retrieval
 half of Phase 13's numbers is unchanged; see the note in retrieval.py about
 which of them move when the ranker moves.)
 
@@ -55,6 +57,24 @@ pretending otherwise would be the bigger lie. And the shipped scorer's work
 is bounded by ``RERANK_TOP_N`` candidates of at most 40 indexed terms, which
 is microseconds; ``tools/phase14_reranker.py`` reports the observed timeout
 count, and it must be 0 for the ON arm's numbers to mean anything.
+
+WHAT THE BUDGET DOES NOT COVER, AND WHAT THIS STAGE ACTUALLY COSTS
+
+``RERANK_BUDGET_MS`` is a deadline handed to ``scorer.order``. It cannot
+bound work that happens before a scorer exists, and ``build_scorer`` is that
+work: two indexed queries over the whole 300-candidate pool. Measured, they
+are the expensive half by a factor of 35 --
+
+    scorer.order   mean 0.098 ms/turn      (inside the budget)
+    build_scorer   mean 3.405 ms/turn      (outside it)
+    stage total    mean 3.503 ms/turn
+
+-- and the phase first quoted only the first line, which understated the
+stage's cost by 35x (D Phase 14 review). ``safe_build_scorer`` makes the
+build TOTAL, so a failure there degrades to CP 14.5 instead of losing the
+turn; making it FAST is the problem of whoever vendors a real encoder, and
+they have to bound the load as well as the scoring. Both numbers are printed
+by ``tools/phase14_reranker.py`` section 3 rather than remembered here.
 """
 
 from __future__ import annotations
@@ -69,63 +89,86 @@ from starter.text import terms
 # Ablation flag (CP 14.6). ON, measured -- `python3 -m tools.phase14_reranker`
 # reproduces all of this.
 #
-#   OFF       HR 0.2100  MRR 0.126192  MTTC 9.030  TS 0.182258
-#   ON        HR 0.2650  MRR 0.141468  MTTC 8.560  TS 0.223740   +0.041482
-#   PLACEBO   HR 0.1900  MRR 0.065857  MTTC 9.380  TS 0.147157   -0.035101
+#   OFF        HR 0.2100  MRR 0.126192  MTTC 9.030  TS 0.182258
+#   ON         HR 0.2850  MRR 0.162099  MTTC 8.360  TS 0.243930   +0.061672
+#   PLACEBO    5 draws, TS 0.158698 .. 0.188206   highest draw    +0.005948
 #
-#   ON vs OFF        +11   12/1 discordant   p = 0.0034   established
-#   PLACEBO vs OFF    -4   9/13 discordant   p = 0.5235   no verdict
-#   ON vs PLACEBO    +15   19/4 discordant   p = 0.0026   established
+#   ON vs OFF        +15   15/0 discordant   p = 0.0001   established
+#   ON vs PLACEBO    established against 4 of the 5 draws (p = 0.0001 ..
+#                    0.0075); no verdict against the highest-scoring one
+#                    (+8, 12/4, p = 0.0768). ON beats every draw on TS by at
+#                    least +0.0557.
 #
 # WHY THE PLACEBO ARM EXISTS, AND WHY IT IS LOAD-BEARING. The evaluator stops
 # a session at its first hit, so ANY reordering of the window reshuffles which
 # sessions happen to land a target in the top 10, and on 200 sessions that can
 # look like a win. The placebo is this same scorer ranking on meaningless
 # terms -- same pool vocabulary, same in-pool IDF, same cardinality per turn,
-# drawn deterministically instead of from what the shopper said. It does not
-# gain; it loses 0.035 TS. So reordering as such is not free money, and the
-# gain is attributable to the shopper's words rather than to the disturbance.
+# drawn deterministically instead of from what the shopper said.
 #
-# The movement table agrees with the score, which is the check that matters:
-# over the turns where the target is inside the window its mean final rank
-# goes 21.6 -> 18.3, it moves up on 44 turns and down on 21, and it crosses
-# INTO the top 10 12 times against 1 push-out -- exactly the 12/1 the
-# session-level McNemar reports. An earlier version of this stage scored
-# +0.024 while moving the target DOWN on average; that contradiction was a
-# bug (see build_scorer), not a subtlety, and it is why this table is printed.
+# FIVE DRAWS, NOT ONE, AND EVERY CLAIM IS MADE AGAINST THE BEST OF THEM.
+# The first version of this comment quoted one draw as "the placebo" and called
+# ON vs PLACEBO established at p = 0.0026. That draw was seeded, through
+# ``context.session_id``, on a uuid4 the evaluator regenerates every run: the
+# control was re-randomized on each execution and the published verdict was
+# one favourable draw of nine, which flipped to "no verdict" on re-run (C and
+# D, Phase 14 review -- the one blocker either raised). The seed is stable
+# now and the claim is made against the HIGHEST-SCORING draw, which is the
+# one draw that does not clear significance. Stated plainly: on this
+# evidence the score comparison alone does not separate ON from a lucky
+# reordering at the 0.05 level in every draw.
+#
+# WHAT DOES SEPARATE THEM IS THE MOVEMENT TABLE, and it is not close. Over
+# the turns where the target sits inside the window:
+#
+#            in window   mean rank    up   down   into top 10   pushed out
+#   ON             148   21.6->17.7   51      1            15            0
+#   PLACEBO      183-206   ~20->~21   8-13  75-91          6-11         5-16
+#
+# Real terms move the target up 51 times and down once. Every placebo draw
+# moves it DOWN on 75-91 turns and pushes it out of the top 10 on 5 to 16.
+# The scores are one sample of a noisy statistic; this is what the mechanism
+# does on every turn, and the two arms are not the same phenomenon. An
+# earlier version of this stage scored +0.024 while moving the target DOWN on
+# average; that contradiction was a bug (see build_scorer), not a subtlety,
+# and it is why this table is printed.
 #
 # THE WINDOW SWEEP, which is also where an earlier version of this comment was
 # wrong. top_n=10 is the control: the window is then the response itself, so
 # the stage can reorder only what was already being shown.
 #
 #   top_n     TS        vs OFF     McNemar vs OFF
-#      10   0.182714   +0.000456   0/0    p = 1.0000  <- control, exactly null
-#      20   0.216959   +0.034701   9/0    p = 0.0039
-#      50   0.223740   +0.041482  12/1    p = 0.0034  <- committed
-#     100   0.234563   +0.052305  18/3    p = 0.0015
-#     200   0.213411   +0.031153  19/9    p = 0.0872
+#      10   0.184039   +0.001781   0/0    p = 1.0000  <- control, exactly null
+#      20   0.231366   +0.049108  12/0    p = 0.0005
+#      50   0.243930   +0.061672  15/0    p = 0.0001  <- committed
+#     100   0.266586   +0.084328  21/0    p = 0.0000
+#     200   0.267069   +0.084811  22/1    p = 0.0000
 #
-# Established at 20, 50 and 100; null at the control; degrading at 200 as the
-# window admits candidates the constraint ranker judged much worse. Five
-# comparisons, so at a Bonferroni alpha/5 = 0.01 the middle three still clear.
-# What carries it beyond any single p-value is that the control is null and
-# the direction is consistent across the plateau -- the same standard the
-# category route is held to in retrieval.py.
+# Established at 20, 50, 100 and 200; null at the control. Five comparisons,
+# so at a Bonferroni alpha/5 = 0.01 all four still clear. What carries it
+# beyond any single p-value is that the control is null and the direction is
+# consistent across the plateau -- the same standard the category route is
+# held to in retrieval.py.
 USE_SEMANTIC_RERANK = True
 
 # CP 14.1. The reranker sees the top N of the ranked list and nothing else.
 #
-# 50, which is NOT the best-scoring row above. 100 measures +0.011 TS better,
-# and taking it would mean selecting a maximum on the same 200 sessions the
-# score is then reported on. 50 was chosen a priori, before any sweep ran,
-# from Phase 13's measured rank distribution -- 176 of the 367 eligible-turn
-# pool hits sit at final rank 11-50, the largest single band a reordering
-# layer can reach -- and it lands mid-plateau with the fewest sessions lost
-# (12 gained, 1 lost). An a-priori value inside a broad established plateau
-# generalizes better than the peak next to the region where the effect decays.
+# 50, which is NOT the best-scoring row above -- and the gap has GROWN. With
+# the framing words stripped the sweep no longer decays at 200: 100 measures
+# +0.023 TS better than 50 and 200 another +0.0005 on top. Taking either
+# would mean selecting a maximum on the same 200 sessions the score is then
+# reported on, and it would mean doing so AFTER seeing the sweep -- which is
+# a worse version of the same trade than it was when the peak was +0.011
+# away. 50 was chosen a priori, before any sweep ran, from Phase 13's
+# measured rank distribution -- 176 of the 367 eligible-turn pool hits sit at
+# final rank 11-50, the largest single band a reordering layer can reach --
+# and it lands inside the established plateau with no sessions lost (15
+# gained, 0 lost). An a-priori value inside a broad established plateau
+# generalizes better than a peak picked off the plateau's own chart.
 #
-# The +0.052 at 100 is left on the table deliberately and recorded here so the
-# choice is auditable rather than quietly optimal.
+# The +0.023 at 100 is left on the table deliberately and recorded here so the
+# choice is auditable rather than quietly optimal. Whoever revisits it should
+# revisit it with a held-out split, not with this table.
 #
 # Not 300. The window must stay a strict subset of the pool for CP 14.1 to
 # mean anything: a stage that reorders everything is not a reranker with a
@@ -264,7 +307,23 @@ class PoolTermScorer:
         free-form, which is the common case in this dataset and is why the
         ablation below has so little to work with.
         """
-        wanted = self.query_terms(context)
+        # ``sorted``, not the set itself. The score below is a float SUM, and
+        # float addition is not associative, so iterating a set of strings
+        # made the last bits of two near-equal scores depend on
+        # PYTHONHASHSEED: one real turn reordered ranks 26-28 on 42 of 400
+        # seeds (D Phase 14 review). It never reached the scored top 10 and
+        # results.json was byte-identical across seeds -- but "deterministic"
+        # is a claim this module makes in its docstring, and a claim that
+        # holds only outside the visible window is not the claim.
+        #
+        # It also holds only on the interpreter you happen to run: CPython
+        # 3.12's ``sum`` compensates (Neumaier) and hides most of this, while
+        # 3.9 -- the version docs/submission_rules.md certifies against, and
+        # the one the observation above came from -- does not. A bug visible
+        # only on the interpreter that scores the submission is the worst
+        # place for one to hide, so it is fixed at the input rather than
+        # relied on to stay invisible.
+        wanted = sorted(self.query_terms(context))
         if not wanted:
             return list(parent_asins)
         weights = {term: self.weight(term) for term in wanted}
@@ -295,6 +354,17 @@ def _evidence_terms(context: Context) -> set[str]:
     Superseded evidence is excluded -- Phase 3 sets ``status`` to
     ``superseded`` on override, and reranking on a withdrawn preference is
     the stale-evidence resurrection that phase exists to prevent.
+
+    Reading ``normalized`` is also what keeps the HARNESS out of the ranking
+    signal, and that is not automatic -- it is a property of what
+    ``state.update_evidence`` strips. Until the Phase 14 review it stripped
+    override plumbing and slot markers but not request framing, so `still`,
+    `exploring`, `key` and `requirement` -- words the local evaluator's
+    sentence templates put in every session -- arrived here as query terms
+    and took 31% of this scorer's total applied weight. They are stripped at
+    the source now (``state._REQUEST_FRAMING``); section 6 of
+    ``tools/phase14_reranker.py`` prints the weight breakdown so a template
+    that gets past that set is visible rather than inferred.
     """
     state = getattr(context, "state", None)
     found: set[str] = set()
@@ -305,6 +375,23 @@ def _evidence_terms(context: Context) -> set[str]:
         if isinstance(normalized, str):
             found.update(terms(normalized))
     return found
+
+
+def _scorer_name(scorer: Any | None) -> str | None:
+    """The scorer's name, or ``None``, without trusting the scorer.
+
+    ``getattr(scorer, "name", None)`` looks total and is not: ``name`` on a
+    model wrapper can be a property, and a property can raise. That line sat
+    ABOVE ``rerank``'s try block, so a scorer that raised while being asked
+    what it was called took the turn down before any fallback existed to
+    catch it (D Phase 14 review). Nothing about a diagnostics label is worth
+    a turn.
+    """
+    try:
+        name = getattr(scorer, "name", None)
+    except Exception:
+        return None
+    return name if isinstance(name, str) else None
 
 
 def _valid_ids(proposed: object, allowed: Iterable[str]) -> tuple[list[str], int]:
@@ -379,7 +466,7 @@ def rerank(
     """
     top_n = RERANK_TOP_N if top_n is None else top_n
     budget_ms = RERANK_BUDGET_MS if budget_ms is None else budget_ms
-    diagnostics = _blank_diagnostics(getattr(scorer, "name", None))
+    diagnostics = _blank_diagnostics(_scorer_name(scorer))
 
     def _finish(outcome: str, ranked: list[Candidate]) -> RankingResult:
         diagnostics["outcome"] = outcome
@@ -450,6 +537,29 @@ def _renumbered(result: RankingResult, ranked: list[Candidate]) -> dict[str, dic
         if isinstance(row, dict):
             updated[candidate.parent_asin] = {**row, "rank": index + 1}
     return updated
+
+
+def safe_build_scorer(
+    connection: Any, candidates: list[Candidate], context: Context
+) -> Any | None:
+    """``build_scorer`` that cannot take the turn down. The call site.
+
+    CP 14.3/14.5 cover a scorer that raises while SCORING. They did not cover
+    a scorer that raises while being BUILT, because ``agent.respond`` passed
+    ``build_scorer(...)`` as an argument to ``rerank`` -- evaluated before
+    ``rerank`` is entered, and so outside every fallback the phase advertises
+    (D Phase 14 review). The one function the docstrings say a future encoder
+    plugs into was the one function with no guard: loading a model is exactly
+    the step that fails on a machine with no weights, no network, or no
+    memory, and it would have failed OUTSIDE the machinery built for it.
+
+    Returning ``None`` here is the CP 14.5 path, which is the correct
+    degradation: no scorer, ranking's order stands, the turn is answered.
+    """
+    try:
+        return build_scorer(connection, candidates, context)
+    except Exception:
+        return None
 
 
 def build_scorer(

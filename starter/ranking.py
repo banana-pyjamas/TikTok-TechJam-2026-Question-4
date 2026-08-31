@@ -160,10 +160,15 @@ DIAGNOSTIC_KEYS = frozenset({
 # Measured directly by ranking each live turn's pool BOTH ways and diffing the
 # orders (``python3 -m tools.phase11_confidence``):
 #
-#   turns with a candidate-order change      527 / 1729   30.5%
-#   turns with a Top-10 order change           3 / 1729    0.2%
-#   turns where the TARGET's rank moved        0 /  424    0.0%
+#   turns with a candidate-order change      440 / 1529   28.8%
+#   turns with a Top-10 order change           3 / 1529    0.2%
+#   turns where the TARGET's rank moved        0 /  327    0.0%
 #   sessions gained / lost                       0 / 0     p = 1.0000
+#
+# Those four move with the pipeline -- they are counted over the live
+# dialogue, and Phase 14 changed both the turn count and where the target
+# sits. Re-run the tool when anything upstream moves; the conclusion below has
+# not changed under any of it, but the numbers supporting it have.
 #
 # So the aggregates being identical to six decimals is a fact about the top of
 # the list, not about the ranking. Three in a thousand turns reorder the Top-10
@@ -176,13 +181,13 @@ DIAGNOSTIC_KEYS = frozenset({
 # single-constraint turn is "a monotone rescale that cannot reorder". False:
 # ``base`` is not scaled by the weight, so shrinking the attribute term moves
 # constraint evidence relative to retrieval order, and ONE constraint suffices.
-# 111 of the 527 changed turns have exactly one active constraint. The module
+# 111 of the 440 changed turns have exactly one active constraint. The module
 # docstring above carries the counterexample, and the same error sat in the
 # Phase 6 paragraph next to it.
 #
 # The census in the tool is still worth reading for what the mechanism had to
 # work with -- CP 11.4's case (firmly meant, poorly attested) occurs 4 times in
-# 1762 constraint occurrences, 0.2% -- but no claim here rests on it.
+# 1536 constraint occurrences, 0.3% -- but no claim here rests on it.
 #
 # So this ships OFF on the same rule as USE_PROFILE: the burden is on the
 # change, and reordering only below the scored cut is not evidence for it.
@@ -199,15 +204,36 @@ USE_CONFIDENCE_WEIGHTING = False
 
 # Ablation flag for the popularity prior (Phase 12).
 #
-# ON, and it is the largest established gain in the project:
+# ON, and it is the largest established gain in the project.
 #
-#   OFF   HR 0.1600   MRR 0.080887   TS 0.134566
-#   ON    HR 0.2100   MRR 0.126192   TS 0.182258     +0.047692
-#   McNemar +10, 10/0 discordant, p = 0.0020  -- established
+# EVERY NUMBER IN THIS COMMENT IS THE LIVE PIPELINE, RE-MEASURED. It used to
+# be the Phase 12 pipeline stated in the present tense, and Phase 14 moved
+# both arms underneath it without touching a word here -- the OFF arm read
+# 0.134566 when the tool that produces it prints 0.187711 (D Phase 14 review,
+# Finding 3). Nothing detected that, because every guard in this repo checks
+# ASSERTIONS and none of them read prose. So: `python3 -m
+# tools.phase12_popularity` regenerates all of it, and moving the pipeline
+# means re-running it and editing here in the same change.
 #
-# Every scenario improves. For comparison the entire Phase 0-6 stack is worth
-# +0.0279 over the baseline, so this one term is worth more than everything
-# before it combined.
+#   OFF   HR 0.2200   MRR 0.123369   MTTC 8.965   TS 0.187711
+#   ON    HR 0.2850   MRR 0.162099   MTTC 8.360   TS 0.243930     +0.056219
+#   McNemar +13, 13/0 discordant, p = 0.0002  -- established
+#
+# tools/phase7_ablation.py reports +10, 10/0, p = 0.0020 for the same flag.
+# Both are right and they are different comparisons: the ladder ablates
+# popularity at Run 3 -> Run 4, with no reranker above it, while the figure
+# here removes the term from the pipeline as it SHIPS. Read the scope, not
+# only the number.
+#
+# Every scenario improves except boundary, which is 0.1000 in both arms --
+# and boundary is 10 sessions, so read it as "no evidence either way" rather
+# than as a null result. buying 0.3625 -> 0.4125, browsing 0.0750 -> 0.1625,
+# intent_override 0.2667 -> 0.3333.
+#
+# For comparison the entire Phase 0-6 stack is worth +0.0279 over the
+# baseline, so this one term is still worth more than everything before it
+# combined. (That figure IS historical and stays fixed: it is the size of a
+# ladder that was measured once and does not move again.)
 #
 # WHY IT IS WORTH SO MUCH, WHICH IS NOT THE FLATTERING ANSWER
 #
@@ -237,10 +263,10 @@ USE_CONFIDENCE_WEIGHTING = False
 # W_POPULARITY is 0.008, an order of magnitude below W_MATCH, exactly as
 # CP 12.4 requires. Raising it pays enormously on this benchmark:
 #
-#   W_POPULARITY   0.008 -> TS 0.182   (shipped)
-#                  0.02  -> TS 0.275
-#                  0.05  -> TS 0.407
-#                  0.10  -> TS 0.500
+#   W_POPULARITY   0.008 -> TS 0.244   (shipped)
+#                  0.02  -> TS 0.330
+#                  0.05  -> TS 0.483
+#                  0.10  -> TS 0.558
 #
 # At 0.10 popularity equals W_MATCH and a bestseller can cancel a satisfied
 # constraint outright -- which is precisely the collapse CP 12.4 forbids. The
@@ -250,8 +276,11 @@ USE_CONFIDENCE_WEIGHTING = False
 # ranker. Left at 0.008; the sweep is recorded here so the trade is visible
 # rather than silently taken or silently forgone.
 #
-# OFF: the popularity term is not computed and the score is exactly the
-# pre-Phase-12 score.
+# OFF: the popularity term is not computed. That is no longer "exactly the
+# pre-Phase-12 score" -- it is the rest of the CURRENT pipeline without this
+# term, which is 0.187711 rather than the 0.134566 the Phase 12 ladder
+# recorded. The ladder figure lives in tools/phase7_ablation.py, where it is
+# labelled as history.
 USE_POPULARITY = True
 
 # Where ``rank`` reads the catalog popularity scale out of ``Context.derived``.

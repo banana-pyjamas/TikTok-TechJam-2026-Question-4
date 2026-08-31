@@ -5,27 +5,37 @@ which is not enough to justify a stage that sits in the middle of every turn.
 So this also reports what the reranker DID: which fallback each turn took,
 how far it moved the hidden target, and what it cost.
 
-Four questions:
+Six questions:
 
   1. NO-OP        does the flag's OFF position reproduce the committed score
                   EXACTLY? A flag whose OFF arm drifts makes every comparison
                   below meaningless.
-  2. SCORE        OFF vs ON, paired McNemar on per-session hit verdicts.
+  2. SCORE        OFF vs ON, paired McNemar on per-session hit verdicts,
+                  against PLACEBO_DRAWS independent draws of a control that
+                  reorders on meaningless words.
   3. BEHAVIOUR    the CP 14.1 - 14.5 paths, counted over the real dialogue --
                   including how often the stage is a no-op because the
-                  shopper volunteered no free text at all.
+                  shopper volunteered no free text at all -- and what the
+                  whole stage costs, build included.
   4. MOVEMENT     for the turns where the target was inside the rerank
                   window, where did it start and where did it end up? This is
                   the question Phase 13 left for Phase 14: 176 eligible-turn
                   pool hits sit at final rank 11-50, and moving them is the
-                  only reason this stage exists.
+                  only reason this stage exists. Reported for every arm.
+  5. ROBUSTNESS   does the gain survive a different window?
+  6. TERMS        WHAT is the scorer ranking on? An ablation says a stage
+                  helps; only this says the stage reads the shopper rather
+                  than the harness's sentence templates.
 
 The CP 14.1 - 14.5 CONTRACTS are unit-tested in tests/test_reranker.py. What
 this tool adds is that they hold on live data -- every reranked output is
 checked to be a permutation of its input, so "the model cannot invent ASINs"
-is verified against the real pipeline and not only against stubs.
+is verified against the real pipeline and not only against stubs. Where a
+live check has no coverage it says so instead of printing a PASS; see the
+CP 14.1 tail note in section 3.
 
-Usage:  python3 -m tools.phase14_reranker      (~2 min: two evaluator runs)
+Usage:  python3 -m tools.phase14_reranker
+        (~10 min: 2 arms + PLACEBO_DRAWS control draws + 5 sweep rows)
 """
 
 from __future__ import annotations
@@ -38,6 +48,7 @@ from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter import reranker
 from starter.contracts import Context
 from starter.reranker import RERANK_KEY, PoolTermScorer, _evidence_terms
+from starter.state import _REQUEST_FRAMING as FRAMING_WORDS
 from tools import config_guard
 from tools.capture import CapturingAgent
 from tools.phase13_dense_gate import first_scoring_turn
@@ -56,6 +67,28 @@ DATASET = "data/public_set.jsonl"
 PRE_RERANK_TECHNICAL_SCORE = 0.182258
 
 
+# How many independent placebo draws to run. One draw is not a control.
+#
+# THIS IS THE FIX FOR THE ONE BLOCKER IN THE PHASE 14 REVIEW (C and D, same
+# finding). The first version seeded each draw on ``context.session_id``,
+# believing it deterministic because it used ``hashlib`` rather than
+# ``hash()``. It is not: ``evaluator/local_evaluator.py`` sets that field to
+# ``f"public_{uuid.uuid4().hex}"``, freshly generated inside ``evaluate`` on
+# every run. The seed had eliminated the small randomness and inherited a
+# larger one, so the "deterministic" placebo was a different draw every run
+# -- observed range 0.147 to 0.192 TS, a spread WIDER than the 0.0415 effect
+# it was controlling for. The committed number was the most favourable of
+# nine draws, and "ON vs PLACEBO: established" became "no verdict" on re-run.
+#
+# Two changes, and both are needed. The seed below is stable (see
+# ``PlaceboScorer.query_terms``), so a single draw now reproduces. And a
+# single draw is still one sample of a random control, so the tool runs
+# several and makes every claim against the HIGHEST-SCORING of them -- if
+# the gain survives the draw that got luckiest, it is not a fact about
+# which draw happened to be quoted.
+PLACEBO_DRAWS = 5
+
+
 class PlaceboScorer(PoolTermScorer):
     """The control arm: the same machinery, ranking on the WRONG words.
 
@@ -71,19 +104,34 @@ class PlaceboScorer(PoolTermScorer):
     reshuffles which sessions happen to land a target in the top 10, and on
     200 sessions that can look like a win. If the placebo gains too, the
     lexical signal is doing nothing and the ON arm must not ship.
-
-    Deterministic across processes: ``hashlib``, never ``hash()``, whose string
-    seed is randomized per interpreter and would make this unreproducible.
     """
 
     name = "placebo"
 
+    def __init__(self, vocabulary, indexed_terms, salt: int = 0) -> None:
+        super().__init__(vocabulary, indexed_terms)
+        self.salt = salt
+
     def query_terms(self, context: Context) -> set[str]:
+        """Meaningless terms, same cardinality, REPRODUCIBLE ACROSS RUNS.
+
+        Seeded from the shopper's own words and the turn number -- both
+        stable properties of the sample -- plus a per-draw salt. NOT from
+        ``context.session_id``, which the evaluator regenerates as a fresh
+        uuid4 on every run and which silently made this whole arm a fresh
+        random draw each time (see PLACEBO_DRAWS above).
+
+        Seeding on the real terms does not leak their meaning: the digest is
+        used only to index a sorted pool vocabulary, so the drawn words are
+        unrelated to the shopper's, which is the property the control needs.
+        Two sessions that said the same thing draw the same placebo, which is
+        a feature -- it is what "deterministic" means here.
+        """
         real = _evidence_terms(context)
         vocabulary = sorted(self.frequencies)
         if not real or not vocabulary:
             return set()
-        seed = f"{context.session_id}:{context.turn}"
+        seed = f"{self.salt}:{context.turn}:{'|'.join(sorted(real))}"
         picked: set[str] = set()
         attempt = 0
         while len(picked) < len(real) and attempt < 100 * len(real):
@@ -93,7 +141,7 @@ class PlaceboScorer(PoolTermScorer):
         return picked
 
 
-def make_placebo_builder(original):
+def make_placebo_builder(original, salt: int = 0):
     """``build_scorer`` with the placebo substituted for the real scorer.
 
     Closes over ``original`` rather than reading ``reranker.build_scorer``:
@@ -108,7 +156,7 @@ def make_placebo_builder(original):
         real = original(connection, candidates, context)
         if not isinstance(real, PoolTermScorer):
             return real
-        placebo = PlaceboScorer(None, real.indexed_terms)
+        placebo = PlaceboScorer(None, real.indexed_terms, salt)
         placebo.pool_size = real.pool_size
         placebo.frequencies = real.frequencies
         return placebo
@@ -117,24 +165,35 @@ def make_placebo_builder(original):
 
 
 def instrument(agent: CapturingAgent, targets: list[str], eligible_from: list[int]):
-    """Wrap ``reranker.rerank`` with observation. Read-only.
+    """Wrap ``reranker.rerank`` and the scorer BUILD with observation.
 
-    Patching the MODULE attribute, which is also how ``agent.respond`` reaches
-    it -- so this observes the real call, not a reimplementation of it. The
-    wrapper never changes the returned order; a tool that measured a different
-    reranker than the one that ships would be worthless.
+    Patching the MODULE attributes, which is also how ``agent.respond``
+    reaches them -- so this observes the real calls, not a reimplementation of
+    them. The wrapper never changes the returned order; a tool that measured a
+    different reranker than the one that ships would be worthless.
+
+    ``safe_build_scorer`` is wrapped too, and that is a correction rather than
+    extra detail: the reported cost of this stage used to be
+    ``diagnostics["elapsed_ms"]``, which times ``scorer.order`` ALONE. The
+    build -- two indexed catalog queries over the whole 300-candidate pool --
+    is the expensive half and was outside the number the phase quoted
+    (D Phase 14 review). Returns ``(stats, restore)``.
 
     Session identity: ``reset`` runs in dataset order, so the first session id
     the wrapper sees belongs to sample 0, and so on. Same bridge every tool in
     this repo uses to get from an opaque uuid back to its sample.
     """
     original = reranker.rerank
+    original_safe_build = reranker.safe_build_scorer
     stats = {
         "outcomes": Counter(),
         "invented": 0,
         "not_a_permutation": 0,
         "tail_disturbed": 0,
+        "tail_nonempty": 0,
         "elapsed": [],
+        "build_elapsed": [],
+        "term_weight": Counter(),
         "moved": [],
         "target_before": [],
         "target_after": [],
@@ -144,6 +203,21 @@ def instrument(agent: CapturingAgent, targets: list[str], eligible_from: list[in
     }
     target_of: dict[str, str] = {}
     eligible_of: dict[str, int] = {}
+
+    def timed_build(connection, candidates, context):
+        started = time.monotonic()
+        try:
+            scorer = original_safe_build(connection, candidates, context)
+        finally:
+            stats["build_elapsed"].append(
+                (time.monotonic() - started) * 1000.0)
+        # What the scorer is about to rank ON, weighted as it will weight it.
+        # Section 6 reads this. Recomputing `query_terms` here is a few
+        # microseconds and keeps the accounting outside the shipped path.
+        if isinstance(scorer, PoolTermScorer):
+            for term in scorer.query_terms(context):
+                stats["term_weight"][term] += scorer.weight(term)
+        return scorer
 
     def counting(result, context, scorer, *args, **kwargs):
         before = [candidate.parent_asin for candidate in result.ranked]
@@ -160,7 +234,17 @@ def instrument(agent: CapturingAgent, targets: list[str], eligible_from: list[in
         if sorted(before) != sorted(after):
             stats["not_a_permutation"] += 1
         # CP 14.1 on live data: everything past the window is untouched.
+        #
+        # ``tail_nonempty`` is counted alongside, because without it this
+        # check is a green light that cannot go red: `agent.respond` ranks to
+        # exactly RERANK_TOP_N with the flag ON, so `before[window:]` and
+        # `after[window:]` are both empty on every turn and the comparison is
+        # `[] != []` (D Phase 14 review). A vacuous PASS is worse than no
+        # check, so the count of turns where there was actually a tail to
+        # disturb is printed next to the verdict.
         window = int(diagnostics.get("considered") or 0)
+        if window and len(before) > window:
+            stats["tail_nonempty"] += 1
         if window and before[window:] != after[window:]:
             stats["tail_disturbed"] += 1
 
@@ -182,7 +266,13 @@ def instrument(agent: CapturingAgent, targets: list[str], eligible_from: list[in
         return output
 
     reranker.rerank = counting
-    return stats, original
+    reranker.safe_build_scorer = timed_build
+
+    def restore() -> None:
+        reranker.rerank = original
+        reranker.safe_build_scorer = original_safe_build
+
+    return stats, restore
 
 
 def main() -> None:
@@ -201,14 +291,17 @@ def main() -> None:
     targets = [str(s["ground_truth"]["parent_asin"]) for s in samples]
     eligible_from = [first_scoring_turn(s, products) for s in samples]
 
-    # Three arms. The placebo is not decoration: without it, "ON gained 6
-    # sessions" cannot be told apart from "any reordering gains ~6 sessions",
-    # because the evaluator stops at the first hit and is therefore sensitive
-    # to permutation as such.
+    # Two arms plus PLACEBO_DRAWS control draws. The placebo is not
+    # decoration: without it, "ON gained 6 sessions" cannot be told apart from
+    # "any reordering gains ~6 sessions", because the evaluator stops at the
+    # first hit and is therefore sensitive to permutation as such. Several
+    # draws rather than one because a single draw of a random control is a
+    # sample, not a control -- see PLACEBO_DRAWS.
     original_build = reranker.build_scorer
-    arms = (("OFF", False, original_build),
-            ("ON", True, original_build),
-            ("PLACEBO", True, make_placebo_builder(original_build)))
+    arms = [("OFF", False, original_build), ("ON", True, original_build)]
+    arms += [(f"PLACEBO{draw}", True, make_placebo_builder(original_build, draw))
+             for draw in range(PLACEBO_DRAWS)]
+    placebo_labels = [label for label, _, _ in arms if label.startswith("PLACEBO")]
     results: dict[str, dict] = {}
     stats: dict[str, dict] = {}
 
@@ -217,11 +310,11 @@ def main() -> None:
         reranker.build_scorer = builder
         agent.order.clear()
         agent.captured.clear()
-        arm_stats, original_rerank = instrument(agent, targets, eligible_from)
+        arm_stats, restore = instrument(agent, targets, eligible_from)
         started = time.time()
         results[label] = evaluate(agent, samples, catalog_ids, categories,
                                   products)
-        reranker.rerank = original_rerank
+        restore()
         reranker.build_scorer = original_build
         elapsed = time.time() - started
         stats[label] = arm_stats
@@ -254,9 +347,18 @@ def main() -> None:
               f"{1000 * elapsed / turn_count:.1f} ms/turn)", flush=True)
     config_guard.restore_committed_flags()
 
-    off, on, placebo = results["OFF"], results["ON"], results["PLACEBO"]
+    off, on = results["OFF"], results["ON"]
     stats_on = stats["ON"]
     turns = len(agent.captured)
+
+    # The draw that is HARDEST for ON to beat, chosen by score rather than by
+    # which one flatters the conclusion. Every "ON vs PLACEBO" claim below is
+    # made against this one; the whole table is printed underneath it so the
+    # spread is visible and the choice is auditable.
+    strongest_placebo = max(
+        placebo_labels,
+        key=lambda label: results[label]["recommended_technical_score"])
+    placebo = results[strongest_placebo]
 
     # -- 1 -------------------------------------------------------------------
     print("\n1. NO-OP -- is the OFF arm a true no-op?")
@@ -289,27 +391,41 @@ def main() -> None:
     # -- 2 -------------------------------------------------------------------
     print("\n2. SCORE -- OFF vs ON, against a placebo that reorders on the")
     print("   WRONG words (same machinery, same term count, same weighting)")
-    for label in ("OFF", "ON", "PLACEBO"):
+    for label in ["OFF", "ON"] + placebo_labels:
         result = results[label]
         conditional = mttc_given_hit(result)
-        print(f"   {label:8}HR {result['hit_rate_at_10']:.4f}  "
+        marker = "  <- highest-scoring draw" if label == strongest_placebo else ""
+        print(f"   {label:10}HR {result['hit_rate_at_10']:.4f}  "
               f"MRR {result['mrr']:.6f}  MTTC {result['mttc']:.3f}  "
               f"MTTC|hit {0.0 if conditional is None else conditional:.3f}"
               f"  TS {result['recommended_technical_score']:.6f}"
-              f"  {result['recommended_technical_score'] - off['recommended_technical_score']:+.6f}")
+              f"  {result['recommended_technical_score'] - off['recommended_technical_score']:+.6f}"
+              f"{marker}")
+    scores = [results[label]["recommended_technical_score"]
+              for label in placebo_labels]
+    print(f"   placebo spread across {len(placebo_labels)} draws: "
+          f"{min(scores):.6f} .. {max(scores):.6f}   "
+          f"(ON - strongest placebo {on['recommended_technical_score'] - max(scores):+.6f})")
     print()
     print("   " + format_test("ON vs OFF",
                               mcnemar(hits_by_sample(off), hits_by_sample(on))))
-    print("   " + format_test("PLACEBO vs OFF",
+    print("   " + format_test(f"{strongest_placebo} vs OFF",
                               mcnemar(hits_by_sample(off), hits_by_sample(placebo))))
-    print("   " + format_test("ON vs PLACEBO",
-                              mcnemar(hits_by_sample(placebo), hits_by_sample(on))))
+    for label in placebo_labels:
+        test = mcnemar(hits_by_sample(results[label]), hits_by_sample(on))
+        print("   " + format_test(f"ON vs {label}", test))
     print("\n   HOW TO READ THIS. The evaluator stops a session at its first")
     print("   hit, so ANY reordering of the top 50 reshuffles which sessions")
     print("   happen to land a target in the top 10. If the placebo gains as")
     print("   much as ON, the shopper's words carried nothing and the ON gain")
     print("   is perturbation. Only 'ON vs PLACEBO' isolates the signal.")
-    print(f"\n   {'scenario':18}{'OFF':>10}{'ON':>10}{'PLACEBO':>10}"
+    print("   Read the whole placebo column, not one row of it. A single draw")
+    print("   of a random control is a sample: the previous version of this")
+    print("   tool seeded the draw on the evaluator's per-run uuid, quoted one")
+    print("   draw as if it were the control, and the verdict flipped on")
+    print("   re-run. Every draw here reproduces exactly, and the claim is")
+    print("   made against the HIGHEST-SCORING of them.")
+    print(f"\n   {'scenario':18}{'OFF':>10}{'ON':>10}{strongest_placebo:>10}"
           f"{'ON-OFF':>10}")
     for scenario in ("buying", "browsing", "intent_override", "boundary"):
         a = off["scenario_metrics"][scenario]["hit_rate_at_10"]
@@ -345,9 +461,13 @@ def main() -> None:
           "volunteered no free text either.")
 
     print("\n   contract checks, on live data rather than on stubs")
-    print(f"   CP 14.1  tail outside the window disturbed   "
-          f"{stats_on['tail_disturbed']:>5}  "
-          f"{'PASS' if not stats_on['tail_disturbed'] else 'FAIL'}")
+    tail_turns = stats_on["tail_nonempty"]
+    print(f"   CP 14.1  turns with a non-empty tail        "
+          f"{tail_turns:>6}  "
+          f"{'VACUOUS -- see below' if not tail_turns else ''}")
+    print(f"   CP 14.1  tail outside the window disturbed  "
+          f"{stats_on['tail_disturbed']:>6}  "
+          f"{('PASS' if not stats_on['tail_disturbed'] else 'FAIL') if tail_turns else 'no live coverage'}")
     print(f"   CP 14.2  outputs that were not a permutation {stats_on['not_a_permutation']:>5}  "
           f"{'PASS' if not stats_on['not_a_permutation'] else 'FAIL'}")
     print(f"   CP 14.2  invented ASINs discarded            "
@@ -355,34 +475,64 @@ def main() -> None:
     print(f"   CP 14.4  budget overruns                     "
           f"{outcomes['timeout']:>5}  "
           f"{'PASS' if not outcomes['timeout'] else 'the ON numbers are not reproducible'}")
+    if not tail_turns:
+        print("   The CP 14.1 tail check has NO live coverage and says so rather")
+        print("   than printing a green PASS. `agent.respond` ranks to exactly")
+        print("   RERANK_TOP_N with the flag ON, so the tail is empty on every")
+        print("   turn and the comparison is `[] != []` -- a check that cannot")
+        print("   go red (D Phase 14 review). CP 14.1 is covered where it can")
+        print("   actually fail: tests/test_reranker.py hands `rerank` a list")
+        print("   longer than the window. The live check stays because the")
+        print("   ranking depth is not a constant of this stage -- it is set by")
+        print("   a `max()` in agent.respond and a future top_k > 50 would give")
+        print("   it teeth without anyone remembering to re-enable it.")
     cost = percentiles(stats_on["elapsed"])
-    print(f"   scorer cost per turn   mean {cost.mean:.3f} ms   "
+    build = percentiles(stats_on["build_elapsed"])
+    print(f"   scorer.order cost per turn   mean {cost.mean:.3f} ms   "
           f"P90 {cost.p90:.3f} ms   max {cost.maximum:.3f} ms   "
           f"(budget {reranker.RERANK_BUDGET_MS:.0f} ms)")
+    print(f"   scorer BUILD cost per turn   mean {build.mean:.3f} ms   "
+          f"P90 {build.p90:.3f} ms   max {build.maximum:.3f} ms   "
+          f"(no budget -- see below)")
+    print(f"   stage total per turn         mean "
+          f"{cost.mean + build.mean:.3f} ms")
+    print("   The build is the expensive half and the phase used to quote only")
+    print("   the other one (D Phase 14 review). It is two indexed queries over")
+    print("   the whole 300-candidate pool, and RERANK_BUDGET_MS does not cover")
+    print("   it -- the budget is a deadline handed to `scorer.order`, and a")
+    print("   deadline cannot bound work that happens before the scorer exists.")
+    print("   `safe_build_scorer` makes the build total (it cannot take a turn")
+    print("   down); making it FAST is a real encoder's problem, and whoever")
+    print("   vendors one has to bound the load here, not only the scoring.")
 
     # -- 4 -------------------------------------------------------------------
     print("\n4. MOVEMENT -- what happened to the hidden target")
-    in_window = stats_on["target_in_window"]
-    print(f"   eligible turns with the target inside the rerank window "
-          f"{in_window:>5}")
-    if in_window:
-        before = percentiles(stats_on["target_before"])
-        after = percentiles(stats_on["target_after"])
-        print(f"   target rank BEFORE rerank   mean {before.mean:>7.1f}   "
-              f"median {before.median:>5.0f}   P90 {before.p90:>5.0f}")
-        print(f"   target rank AFTER  rerank   mean {after.mean:>7.1f}   "
-              f"median {after.median:>5.0f}   P90 {after.p90:>5.0f}")
-        improved = sum(1 for b, a in zip(stats_on["target_before"],
-                                         stats_on["target_after"]) if a < b)
-        worsened = sum(1 for b, a in zip(stats_on["target_before"],
-                                         stats_on["target_after"]) if a > b)
-        print(f"   target moved UP {improved}, DOWN {worsened}, "
-              f"unchanged {in_window - improved - worsened}")
-        print(f"   crossed INTO the top 10   {stats_on['target_into_top10']:>5}")
-        print(f"   pushed OUT of the top 10  {stats_on['target_out_of_top10']:>5}")
-        print("   Turn-level, so one session can contribute several rows; the")
-        print("   session-level consequence is the McNemar test in (2), which is")
-        print("   the number that decides the flag.")
+    print("   Every arm, not just ON. This table is the evidence the score")
+    print("   comparison cannot give: the placebo's SCORE only says a random")
+    print("   reordering did not happen to win on 200 sessions, while its")
+    print("   MOVEMENT says what a random reordering does to the target every")
+    print("   single time. The tool computed these rows for the placebo from")
+    print("   the first version and printed only ON's (D Phase 14 review).")
+    print(f"\n   {'arm':12}{'in window':>10}{'mean before':>13}"
+          f"{'mean after':>12}{'up':>6}{'down':>6}{'->top10':>9}{'out':>6}")
+    for label in ["ON"] + placebo_labels:
+        arm = stats[label]
+        in_window = arm["target_in_window"]
+        if not in_window:
+            print(f"   {label:12}{in_window:>10}")
+            continue
+        before = percentiles(arm["target_before"])
+        after = percentiles(arm["target_after"])
+        improved = sum(1 for b, a in zip(arm["target_before"],
+                                         arm["target_after"]) if a < b)
+        worsened = sum(1 for b, a in zip(arm["target_before"],
+                                         arm["target_after"]) if a > b)
+        print(f"   {label:12}{in_window:>10}{before.mean:>13.1f}"
+              f"{after.mean:>12.1f}{improved:>6}{worsened:>6}"
+              f"{arm['target_into_top10']:>9}{arm['target_out_of_top10']:>6}")
+    print("   Turn-level, so one session can contribute several rows; the")
+    print("   session-level consequence is the McNemar test in (2), which is")
+    print("   the number that decides the flag.")
 
     # -- 5 -------------------------------------------------------------------
     print("\n5. ROBUSTNESS -- does the gain survive a different window?")
@@ -415,6 +565,32 @@ def main() -> None:
     print("   than any single p-value (D-P3): what carries the conclusion is")
     print("   that the control is null and the direction holds across the")
     print("   plateau, not that a particular row cleared 0.05.")
+
+    # -- 6 -------------------------------------------------------------------
+    print("\n6. WHAT THE SCORER IS ACTUALLY RANKING ON")
+    print("   The one question an ablation cannot answer. OFF vs ON says the")
+    print("   reordering helps; it does not say the reordering reads the")
+    print("   SHOPPER. Total in-pool IDF weight applied per term over the run:")
+    weights = stats_on["term_weight"]
+    total = sum(weights.values()) or 1.0
+    for term, weight in weights.most_common(12):
+        flag = "  <- REQUEST FRAMING" if term in FRAMING_WORDS else ""
+        print(f"   {term:24}{weight:>12.1f}{weight / total:>9.1%}{flag}")
+    framing = sum(weight for term, weight in weights.items()
+                  if term in FRAMING_WORDS)
+    print(f"   {'-- framing total --':24}{framing:>12.1f}"
+          f"{framing / total:>9.1%}")
+    print("\n   This section exists because that share was 30.9% -- `still`")
+    print("   alone 23.3%, 8.6x the top real product word -- and nothing in the")
+    print("   phase would have shown it (D Phase 14 review, Finding 2). Those")
+    print("   words come from the evaluator's own sentence templates:")
+    print("   \"...but I'm still exploring.\", \"A key requirement is:\",")
+    print("   \"For that, what matters is:\". They are not the shopper's")
+    print("   vocabulary, they are the simulator's, and ranking on them means")
+    print("   ranking on which catalog description happens to contain the word")
+    print("   \"still\". starter/state.py now strips them at distillation")
+    print("   (_REQUEST_FRAMING), which is worth +0.0202 TS on its own. A")
+    print("   nonzero framing share here means a template got past that set.")
 
     print(f"\nturns: {turns}   config: {config_guard.describe()}")
 
