@@ -155,6 +155,55 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
     ("clarify", "ASK_POOL_DEPTH"): 50,
     ("clarify", "PRICE_BUCKETS"): 4,
     ("clarify", "ASK_VALUE_FLOOR"): 0.10,
+    ("clarify", "MAX_OPEN_QUESTIONS"): 1,
+}
+
+# Non-numeric constants that decide what gets measured just as hard as the
+# numbers above, and which ``discover_numeric_constants`` is blind to by
+# construction.
+#
+# THIS IS THE THIRD APPEARANCE OF ONE SHAPE and it is fixed the same way as
+# the other two: the registry is CHECKED against the source, not maintained
+# beside it. ``clarify.SCORABLE_ATTRIBUTES`` could be emptied to ``()`` and
+# the entire battery -- 561 tests, eight tools, the numeric guard -- passes
+# green while the question policy silently degrades to the wildcard, which
+# the commit that added it calls a +0.0144 lever (D Phase 15 review). The
+# numeric guard's own docstring dismissed "string vocabularies" as content
+# rather than configuration; that was right for SOFT_CUES and wrong the
+# moment a tuple started selecting a policy.
+#
+# The rule for what belongs here: a non-numeric module-level constant is
+# CONFIGURATION if changing it changes a measured number, and CONTENT if it
+# only adds or removes words from a vocabulary. ``assert_all_constants_pinned``
+# enforces the boundary by requiring every tuple-of-strings constant to be
+# either registered or explicitly listed as content below.
+SEQUENCE_CONSTANTS: dict[tuple[str, str], Any] = {
+    ("retrieval", "DEFAULT_ROUTES"): ("bm25", "category"),
+    ("clarify", "ALLOWED_ATTRIBUTES"): (
+        "category", "material", "color", "size", "style", "brand", "budget",
+        "feature", "use_case", "other"),
+    ("clarify", "SCORABLE_ATTRIBUTES"): (
+        "category", "color", "material", "brand", "size", "budget"),
+    ("clarify", "EVIDENCE_ATTRIBUTES"): ("feature", "use_case", "style"),
+    ("ranking", "SCORED_SLOTS"): (
+        "category", "color", "material", "brand", "size", "budget"),
+    # Not flagged by any reviewer -- found by the completeness check the same
+    # hour it was written, which is the point of deriving the expectation.
+    # It decides which slots make a turn "buying", and phase9_mode_accuracy
+    # reports a number that moves with it.
+    ("strategy", "SPECIFIC_SLOTS"): (
+        "color", "material", "brand", "size", "budget"),
+}
+
+# Tuple constants that are CONTENT, not configuration: word lists whose
+# growth is ordinary editing. Listed so the completeness check can tell
+# "deliberately content" from "forgotten", which is the distinction the
+# numeric registry's blanket exemption could not express.
+# Checked against the source too (``assert_all_constants_pinned``), so an
+# entry naming a constant that no longer exists is caught rather than
+# quietly outliving it.
+CONTENT_SEQUENCES = {
+    ("reranker", "OUTCOMES"),
 }
 
 
@@ -173,7 +222,7 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
 # historical reference rather than the committed one.)
 #
 # Moving the committed score means updating this line in the same change.
-COMMITTED_TECHNICAL_SCORE = 0.726726
+COMMITTED_TECHNICAL_SCORE = 0.722979
 
 
 def _module(name: str):
@@ -285,6 +334,41 @@ def discover_numeric_constants() -> set[tuple[str, str]]:
     return found
 
 
+def discover_sequence_constants() -> set[tuple[str, str]]:
+    """Every module-level tuple-of-strings constant in the ``starter`` package.
+
+    The non-numeric half of ``discover_numeric_constants``, added after
+    ``SCORABLE_ATTRIBUTES`` shipped as a policy selector that no guard could
+    see. Read from the SOURCE for the same reason that one is: attribution to
+    the defining module, and immunity to a re-export.
+
+    Tuples only, and deliberately. A ``set`` or ``frozenset`` literal in this
+    package is always a vocabulary (STOPWORDS, SOFT_CUES, VIOLATION_SLOTS) and
+    a ``tuple`` is always an ordered, meaningful sequence -- the convention is
+    already consistent across every module, so the type is a usable proxy for
+    the distinction and does not need a second registry to encode it.
+    """
+    found: set[tuple[str, str]] = set()
+    for module_name in STARTER_MODULES:
+        source = Path(_module(module_name).__file__).read_text(encoding="utf-8")
+        for node in ast.parse(source).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            value = node.value
+            if not isinstance(value, ast.Tuple):
+                continue
+            if not all(isinstance(element, ast.Constant)
+                       and isinstance(element.value, str)
+                       for element in value.elts):
+                continue
+            for target in node.targets:
+                if (isinstance(target, ast.Name)
+                        and target.id.isupper()
+                        and not target.id.startswith("_")):
+                    found.add((module_name, target.id))
+    return found
+
+
 def source_flags() -> dict[tuple[str, str], Any]:
     """Every ``USE_`` flag's value as WRITTEN IN THE SOURCE.
 
@@ -352,6 +436,22 @@ def assert_all_constants_pinned() -> None:
             + ". Add each with its committed value, so that moving it later "
             "fails loudly instead of silently changing every measured number."
         )
+    sequences = discover_sequence_constants()
+    stale = sorted((set(SEQUENCE_CONSTANTS) | CONTENT_SEQUENCES) - sequences)
+    if stale:
+        raise SystemExit(
+            "config_guard: these registered tuple constants no longer exist: "
+            + ", ".join(f"{module}.{name}" for module, name in stale))
+    unclassified = sorted(
+        sequences - set(SEQUENCE_CONSTANTS) - CONTENT_SEQUENCES)
+    if unclassified:
+        raise SystemExit(
+            "config_guard: these tuple constants are neither pinned in "
+            "SEQUENCE_CONSTANTS nor declared content in CONTENT_SEQUENCES: "
+            + ", ".join(f"{module}.{name}" for module, name in unclassified)
+            + ". Decide which: a tuple that selects a policy is "
+            "configuration and must be pinned; a word list is content."
+        )
 
 
 def assert_committed_constants() -> None:
@@ -362,7 +462,8 @@ def assert_committed_constants() -> None:
     """
     assert_all_constants_pinned()
     drifted = []
-    for (module_name, name), expected in sorted(COMMITTED_CONSTANTS.items()):
+    for (module_name, name), expected in sorted(
+            list(COMMITTED_CONSTANTS.items()) + list(SEQUENCE_CONSTANTS.items())):
         actual = getattr(_module(module_name), name)
         if actual != expected:
             drifted.append(f"{module_name}.{name}: {actual!r} != {expected!r}")
@@ -400,3 +501,47 @@ def describe() -> str:
         for module, name in sorted(COMMITTED_CONSTANTS)
     ]
     return ", ".join(parts)
+
+
+def assert_everything() -> list[str]:
+    """Every check this module has, run in one call. Returns what it checked.
+
+    Added because ``python3 -m tools.config_guard`` exited 0 having asserted
+    NOTHING -- the module was import-only -- and that exit code was cited as
+    evidence in two separate reviews (D Phase 15 review, item 6). A command
+    that cannot fail is worse than no command: it produces the appearance of
+    verification, which is exactly what a guard is for.
+
+    Returning the list of checks, and printing it below, is the other half of
+    the same lesson. A probe must prove it FIRED before its result is quoted;
+    a bare "OK" cannot distinguish "all six checks passed" from "the function
+    returned early".
+    """
+    checks: list[str] = []
+    assert_module_list_is_complete()
+    checks.append(f"module list matches the package ({len(STARTER_MODULES)} modules)")
+    flags = discover_flags()
+    assert_all_flags_pinned(set(COMMITTED_FLAGS))
+    checks.append(f"every USE_ flag is pinned ({len(flags)} found)")
+    assert_committed_flags_match_source()
+    checks.append(f"COMMITTED_FLAGS matches the source ({len(COMMITTED_FLAGS)})")
+    numeric = discover_numeric_constants()
+    sequences = discover_sequence_constants()
+    assert_committed_constants()
+    checks.append(
+        f"every constant is pinned and undrifted "
+        f"({len(numeric)} numeric, {len(sequences)} tuple)")
+    return checks
+
+
+def main() -> None:
+    checks = assert_everything()
+    for check in checks:
+        print(f"  PASS  {check}")
+    print(f"\n{len(checks)} checks passed")
+    print(f"committed score: {COMMITTED_TECHNICAL_SCORE}")
+    print(f"config: {describe()}")
+
+
+if __name__ == "__main__":
+    main()

@@ -45,31 +45,44 @@ with both in view rather than by reading the larger number.
 
 WHAT IT ACTUALLY ASKS
 
-Over the 200 live sessions (719 questions on 874 turns, 155 turns silent):
+Over the 200 live sessions (918 questions on 932 turns, 14 turns silent):
 
-    other      301   41.9%      color      104   14.5%
-    brand      200   27.8%      budget       2    0.3%
-    material   112   15.6%      category / size, never
+    feature   282  30.7%     use_case   57   6.2%     budget   37   4.0%
+    brand     200  21.8%     style      50   5.4%     size     19   2.1%
+    color     116  12.6%     other      42   4.6%     category      never
+    material  115  12.5%
 
-``category`` is never asked because the opening message always fills it, and
-``size`` never because 9.6% catalog coverage keeps its value under the floor
--- both are the scorer declining a question rather than a gap in it. The
-longest session asks 7 questions and none exhausts the attribute list, so
-CP 15.7's bound is never the thing that stops the loop; the shopper running
-out of preferences is.
+``category`` is never asked because the opening message always fills it. The
+open question is 4.6% of all questions and reaches 42 of 200 sessions, which
+is the number the B Phase 15 review asked to see come down; see
+MAX_OPEN_QUESTIONS for how.
 
-WHY THE SCORER ONLY SCORES SIX ATTRIBUTES
+TWO TIERS OF QUESTION, AND WHY THE SECOND ONE EXISTS
 
-The contract allows ten (CP 15.3). Six of them -- category, color, material,
-brand, size, budget -- are exactly the six ``state.SLOT_CARDINALITY`` can
-store and exactly the six ``catalog_meta`` carries a column for. That is not a
-coincidence to work around; it is the boundary of what an answer can DO. An
-answer about ``style`` cannot become a slot, cannot be checked against the
-catalog, and cannot change the ranking, so asking for one buys a sentence and
-nothing else. The scorer therefore scores what the pipeline can act on, and
-``"other"`` is the open question it falls back to -- "is there anything else
-that matters?" -- which is a real thing to ask a shopper and is the only legal
-way to invite information the slot vocabulary has no name for.
+The contract allows ten values (CP 15.3). Nine of them are askable here, in
+two tiers:
+
+  SCORABLE    category, color, material, brand, size, budget -- exactly the
+              six ``state.SLOT_CARDINALITY`` can store and exactly the six
+              ``catalog_meta`` carries a column for. An answer becomes a slot
+              and is checkable, so a VALUE can be computed for the question
+              (see ``attribute_value``) and the best one is asked first.
+
+  EVIDENCE    feature, use_case, style -- no slot, no catalog column, and so
+              no computable value. Asked in fixed order after the scorable
+              ones.
+
+The first version of this file had only the first tier, on the argument that
+an unslotted answer "cannot change the ranking, so asking for one buys a
+sentence and nothing else". That argument was wrong, and Phase 14 is the
+counterexample: ``reranker.PoolTermScorer`` ranks the window on the shopper's
+still-active free-text evidence, which is precisely where an unslotted answer
+lands. Such an answer changes the ranking through the reranker instead of
+through ``score_candidate`` -- a different path, not no path.
+
+The error was expensive rather than academic. With only six askable
+attributes the open question was the only way to reach most of what a shopper
+has to say, which is what made ``"other"`` load-bearing and drew the review.
 """
 
 from __future__ import annotations
@@ -88,12 +101,20 @@ from starter.state import is_non_answer
 # reproduces all of this:
 #
 #   OFF   HR 0.2850  MRR 0.162099  MTTC 8.360  TS 0.243930
-#   ON    HR 0.8450  MRR 0.582419  MTTC 4.525  TS 0.726726   +0.482796
+#   ON    HR 0.8500  MRR 0.580597  MTTC 4.810  TS 0.722979   +0.479049
 #
-#   ON vs OFF   +112   114/2 discordant   p = 0.0000   established
+#   ON vs OFF (hits)    +113   114/1 discordant       p = 0.0000  established
+#   ON vs OFF (score)   +0.479049  95% CI [+0.4183, +0.5383]
+#                       125/200 sessions moved        p = 0.0001  established
 #
-# Every scenario, by a lot: buying +0.4500, browsing +0.6875, override
-# +0.4667, boundary +0.7000. This one flag is worth 3.5x the whole of Phases
+# BOTH tests, because they answer different questions and this project has
+# now mispriced a verdict twice by quoting only the first (D Phase 15 review).
+# McNemar sees the hit SET; the paired permutation over per-session
+# composites sees the score, including rank and turn movement McNemar is
+# blind to. They agree here. Where they disagree, say so.
+#
+# Every scenario, by a lot: buying +0.4500, browsing +0.6750, override
+# +0.5000, boundary +0.8000. This one flag is worth 3.5x the whole of Phases
 # 0-14 combined (+0.1372 over the baseline), which is not a compliment to
 # this phase so much as a statement about what the previous fourteen were
 # optimising. They made the agent better at answering a question it was never
@@ -108,19 +129,23 @@ from starter.state import is_non_answer
 #
 # WHICH QUESTION, WHICH IS THE PART THIS BENCHMARK CANNOT SETTLE
 #
-#   shipped (value-scored)   TS 0.726726
-#   wildcard every turn      TS 0.719419     shipped vs it: +7, 9/2, p = 0.0654
-#   first empty slot         TS 0.704984     shipped vs it: +0, 2/2, p = 1.0000
-#   scored, no open question TS 0.413290
-#   harness-fitted           TS 0.741172     vs shipped:    +1, 2/1, p = 1.0000
+#   shipped (C, one open question)  TS 0.722979
+#   unbounded open question (A)     TS 0.722979   vs shipped: IDENTICAL
+#   no open question at all (B)     TS 0.686029   vs shipped: -0.0370, 9/0,
+#                                                 p = 0.0039  established
+#   wildcard every turn (D)         TS 0.719419
+#   first empty slot                TS 0.704984
+#   harness-fitted                  TS 0.726837   vs shipped: +1, 2/1, p = 1.0
 #
-# Read those in the order they matter. The last row is the big one: with the
-# open question removed the phase loses two thirds of its gain, so most of
-# what clarification buys is ASKING AT ALL, and the value scorer is choosing
-# the ORDER rather than the content. The shipped policy is nominally ahead of
-# the wildcard and the naive policy, and neither margin is established --
-# stated plainly, this benchmark does not show that the clever question beats
-# the dumb one.
+# Read the A row first: capping the open question at one per session costs
+# nothing measurable, because with the evidence tier no session wanted a
+# second one. Then read B: removing it entirely costs an established 0.0370.
+# So the open question is no longer load-bearing but it is not free either,
+# and both facts are stated rather than one of them.
+#
+# The shipped policy is ahead of the wildcard-every-turn arm and the naive
+# first-empty-slot arm, and neither margin is established -- stated plainly,
+# this benchmark does not show that the clever question beats the dumb one.
 #
 # It cannot show it, either, and that is the load-bearing sentence: `"other"`
 # matches a strict superset of what any specific question matches (see the
@@ -169,6 +194,34 @@ SCORABLE_ATTRIBUTES = (
     "category", "color", "material", "brand", "size", "budget",
 )
 
+# CP 15.5, the second tier: askable but NOT value-scorable.
+#
+# THIS TIER EXISTS BECAUSE THE FIRST VERSION OF THIS FILE GOT ITS OWN
+# ARGUMENT WRONG. It excluded these three on the grounds that an answer
+# "cannot become a slot, cannot be checked against the catalog, and cannot
+# change the ranking, so asking for one buys a sentence and nothing else".
+# The first two clauses are true. The third is FALSE, and Phase 14 is the
+# proof: ``reranker.PoolTermScorer`` ranks the window on the shopper's
+# still-active free-text evidence, which is exactly where an unslotted answer
+# lands. A "reinforced toe" answer changes the ranking through the reranker
+# rather than through ``score_candidate``; it was never inert.
+#
+# The cost of that error was concrete. With only six askable attributes the
+# open question was the ONLY way to reach the majority of what this shopper
+# has to say -- ``local_evaluator.classify_constraint`` falls back to
+# "feature" for anything it cannot bucket, so most constraints are
+# feature-class -- which is what made the wildcard load-bearing and drew the
+# B Phase 15 blocker. Bounding the wildcard without this tier costs 0.0466
+# TS; with it, see MAX_OPEN_QUESTIONS.
+#
+# No value score, because there is no catalog column to compute one from.
+# They are tried in a fixed order after every scorable attribute and before
+# the open question: a specific question is always preferable to an open one,
+# and this is the cheapest way to make that preference reachable.
+EVIDENCE_ATTRIBUTES = (
+    "feature", "use_case", "style",
+)
+
 # How deep into the ranked list a question's value is judged. The question
 # "would knowing this split the answer" is about the candidates the shopper is
 # about to be shown and the ones just behind them -- not about the 300-row
@@ -197,22 +250,68 @@ PRICE_BUCKETS = 4
 # not to pick the peak.
 #
 #   floor    TS         vs OFF
-#   0.00   0.692042   +0.448112   <- ask a specific question on any signal
-#   0.05   0.723034   +0.479104
-#   0.10   0.726726   +0.482796   <- committed, chosen a priori
-#   0.20   0.731636   +0.487706
-#   0.40   0.733548   +0.489618
+#   0.00   0.701142   +0.457212   <- ask a value-scored question on any signal
+#   0.05   0.717937   +0.474007
+#   0.10   0.722979   +0.479049   <- committed, chosen a priori
+#   0.20   0.704196   +0.460266
+#   0.40   0.677156   +0.433226
 #
-# Not a cliff anywhere above 0.05, which is what the sweep was for. It is
-# also not the peak: 0.40 measures +0.0068 better, which is roughly one
-# session on 200, and taking it would mean reading a maximum off a table
-# produced by the same 200 sessions the score is then reported on. Same trade
-# as reranker.RERANK_TOP_N and refused the same way. The direction is worth
-# noting for whoever revisits it with a held-out split: a HIGHER floor asks
-# fewer specific questions, so what the table is saying is that the wildcard
-# is a strong default here -- which is exactly what the harness's own
-# superset rule predicts, and exactly why it is not evidence.
+# Not a cliff, and the a-priori value happens to top the table. That is luck
+# and is recorded as luck: 0.05 is 0.005 away, which is half a session, and
+# the choice was made before this sweep existed. Nobody should read the peak
+# as evidence the value was tuned well.
+#
+# The shape changed direction when EVIDENCE_ATTRIBUTES landed. Before it, a
+# higher floor scored better, because falling through the floor meant
+# reaching the wildcard and the harness rewards the wildcard. Now falling
+# through means reaching a specific evidence question, and the curve has an
+# interior maximum -- which is what a threshold with a real trade-off on both
+# sides looks like, rather than a proxy for "how often do we say other".
 ASK_VALUE_FLOOR = 0.10
+
+
+# CP 15.2. How many times ONE session may fall back to the open question.
+#
+# THIS IS THE B PHASE 15 BLOCKER, AND THE NUMBER IS THE ANSWER TO IT. The
+# first version had no budget: the wildcard was the fallback on every turn no
+# specific attribute cleared the floor, and a productive one could be re-asked
+# indefinitely. On a harness whose ``customer_reply`` treats "other" as a
+# wildcard matching a strict superset of every specific attribute, that is
+# farming the simulator -- and the review was right that the evidence showed
+# it, because removing the open question cost two thirds of the phase's gain.
+#
+# 1, and the measurement says the cap is FREE. The arms are in
+# tools/phase15_clarification.py:
+#
+#   policy                    TS      other/session   sessions using other
+#   A  unbounded           0.722979       0.33             42/200
+#   B  no open question    0.686029       0.00              0/200
+#   C  at most one  <-     0.722979       0.21             42/200
+#   D  wildcard every turn 0.719419       3.72            200/200
+#
+# A and C are IDENTICAL -- 0/0 discordant, 0 of 200 sessions moved, every
+# metric equal to six decimals. With the evidence tier in the ladder no
+# session ever wants a second open question, so capping it changes nothing
+# that happens; it only guarantees a thing that was already true. That is
+# worth having exactly because nothing enforced it before, and because the
+# thing it forbids -- re-asking a productive wildcard until it dries up -- is
+# farming a harness whose ``customer_reply`` treats "other" as matching a
+# strict superset of every specific attribute.
+#
+# B is the strictly-generic policy: no open question at any point. It costs
+# an ESTABLISHED 0.0370 (9/0 discordant, p = 0.0039; paired permutation over
+# per-session composites p = 0.0017). That is a real price, not noise, and it
+# is stated as one. Anyone who wants zero wildcard dependence sets this to 0
+# and pays it knowingly.
+#
+# WHAT MADE THE CAP CHEAP was not the cap. Before ``EVIDENCE_ATTRIBUTES``
+# existed, bounding the wildcard cost 0.0466 and removing it cost 0.266,
+# because the six catalog-checkable attributes could not reach the majority
+# of what this shopper has to say. Adding the three evidence questions moved
+# "other" from load-bearing to optional. The B Phase 15 blocker was right
+# about the dependence and the fix was to give the policy better specific
+# questions, not to force it to do without.
+MAX_OPEN_QUESTIONS = 1
 
 
 class ClarificationLedger:
@@ -243,12 +342,16 @@ class ClarificationLedger:
     session. The evaluator's 10-turn cap is the looser of the two bounds.
     """
 
-    __slots__ = ("asked", "closed", "pending")
+    __slots__ = ("asked", "closed", "pending", "wildcard_uses")
 
     def __init__(self) -> None:
         self.asked: list[str] = []
         self.closed: set[str] = set()
         self.pending: str | None = None
+        # CP 15.2, the open question's per-session budget. Counted rather than
+        # flagged because ``MAX_OPEN_QUESTIONS`` is a number and 0 / 1 / many
+        # are all policies someone might want; see that constant.
+        self.wildcard_uses: int = 0
 
     def observe(self, user_message: object) -> None:
         """CP 15.7 -- read the reply to the last question we asked.
@@ -278,6 +381,8 @@ class ClarificationLedger:
             return
         self.asked.append(attribute)
         self.pending = attribute
+        if attribute == WILDCARD:
+            self.wildcard_uses += 1
 
     def open_attributes(self) -> tuple[str, ...]:
         return tuple(name for name in ALLOWED_ATTRIBUTES
@@ -436,6 +541,60 @@ def rank_attributes(
     return [(value, attribute) for value, _, attribute in scored]
 
 
+def safe_choose(
+    context: Context,
+    ledger: ClarificationLedger,
+    ranked: Sequence[Candidate],
+    metadata: dict[str, dict[str, Any]] | None,
+    reliabilities: dict[str, float] | None = None,
+) -> str | None:
+    """``choose`` that cannot take the turn down. THE CALL SITE.
+
+    Phase 14 learned this and Phase 15 did not: ``build_scorer`` was passed as
+    an argument to ``rerank``, so it was evaluated outside every fallback the
+    reranker advertised, and the review's fix was ``safe_build_scorer``. One
+    phase later ``clarify.choose`` shipped with exactly the same shape --
+    called bare from ``agent.respond``, downstream of a metadata dict whose
+    shape it trusts -- and a raise there does not produce a bad question, it
+    produces an exception that ``evaluate`` swallows into an empty response
+    and scores as zero for the whole turn (D Phase 15 review).
+
+    And ``choose`` DOES raise. The first version of this docstring said it
+    was "defensive throughout" and that no known input reached a raise; that
+    was written from reading the code rather than from running it, and it is
+    false. Of ten adversarial inputs, four raise from the bare function --
+    ``ranked=None`` and ``ranked=7`` are TypeErrors, a string or a non-
+    Candidate element is an AttributeError. None of them can occur through
+    ``agent.respond`` today, because ``RankingResult.ranked`` is always a
+    list of ``Candidate``. "Cannot happen through the current caller" is a
+    property of the CALLER, and the caller is one edit away from changing.
+
+    The rule this codebase has now demonstrated twice and never written down:
+    EVERY UNTRUSTED LAYER DEGRADES RATHER THAN RAISES, where "untrusted"
+    means "computed from something another module owns", not "known to be
+    buggy". Clarification is strictly optional -- the turn is answerable
+    without a question -- so the failure mode is ``None``, which is CP 15.1's
+    baseline behaviour and costs nothing but the question.
+    """
+    try:
+        return choose(context, ledger, ranked, metadata, reliabilities)
+    except Exception:
+        return None
+
+
+def safe_observe(ledger: ClarificationLedger, user_message: object) -> None:
+    """``ledger.observe`` under the same rule, for the same reason.
+
+    It reads a message the harness owns and calls a regex over it. A raise
+    here would lose the turn just as completely, and losing the LEDGER only
+    costs the CP 15.7 bookkeeping for one turn.
+    """
+    try:
+        ledger.observe(user_message)
+    except Exception:
+        ledger.pending = None
+
+
 def choose(
     context: Context,
     ledger: ClarificationLedger,
@@ -445,23 +604,39 @@ def choose(
 ) -> str | None:
     """CP 15.2 / 15.3 / 15.5 / 15.6 -- the attribute to ask about, or ``None``.
 
-    The decision, in order:
+    A four-rung ladder, and the ORDER is the whole policy:
 
       1. a scorable attribute that is still open, not already known, and worth
-         more than ``ASK_VALUE_FLOOR`` -- the best one;
-      2. otherwise the open question, if it is still open;
-      3. otherwise ``None`` -- everything has been asked and answered empty,
-         and asking again would be noise.
+         at least ``ASK_VALUE_FLOOR`` -- the best one;
+      2. otherwise an EVIDENCE attribute that is still open, in fixed order.
+         No value score exists for these; what makes them rung 2 rather than
+         rung 4 is that a SPECIFIC question is always preferable to an open
+         one, and they are the only specific questions left;
+      3. otherwise the open question, if the session has any of its
+         ``MAX_OPEN_QUESTIONS`` budget left and it is not closed;
+      4. otherwise the best scorable attribute that is worth ANYTHING at all,
+         even below the floor;
+      5. otherwise ``None``.
 
-    (3) is the CP 15.2 "do not ask" case and it is the only one this dataset
-    reaches, because on this harness there is no COST to asking: the shopper
-    answers a question and a recommendation list in the same turn (CP 15.4),
-    so a question that fails costs nothing but the sentence. A deployment
-    where questions cost patience wants a second gate here -- turn budget,
-    or the ``strategy.classify_mode`` distinction between a shopper who has
-    named specifics and one still exploring, which is built and measured
-    (``tools/phase9_mode_accuracy.py``) and deliberately not wired in on a
-    benchmark that cannot see the difference.
+    RUNGS 2 AND 4 ARE WHAT MAKE RUNG 3 BOUNDABLE, and together they are the
+    shape of the B Phase 15 blocker's fix. The first version of this function
+    had only the equivalent of rungs 1, 3 and 5: below the floor it reached
+    for the wildcard, and if the wildcard was gone it went silent. That made
+    the open question load-bearing BY CONSTRUCTION -- removing it did not
+    produce a policy that asked specific questions instead, it produced a
+    policy that stopped asking (TS 0.413290, which the review correctly read
+    as "the wildcard explains a material part of the gain"). With a real
+    question below it in the ladder, the budget in rung 3 becomes a knob
+    rather than a load-bearing beam.
+
+    Rung 5 is the CP 15.2 "do not ask" case. On this harness there is no COST
+    to asking -- the shopper answers a question and a recommendation list in
+    the same turn (CP 15.4), so a question that fails costs nothing but the
+    sentence. A deployment where questions cost patience wants a second gate
+    here: turn budget, or the ``strategy.classify_mode`` distinction between
+    a shopper who has named specifics and one still exploring, which is built
+    and measured (``tools/phase9_mode_accuracy.py``) and deliberately not
+    wired in on a benchmark that cannot see the difference.
 
     Returns a value from ``ALLOWED_ATTRIBUTES`` or ``None``, always: the
     return is a member check away from the contract enum, so a scorer bug
@@ -474,10 +649,17 @@ def choose(
             continue
         best_value, best_attribute = value, attribute
         break
+    unscored = next((attribute for attribute in EVIDENCE_ATTRIBUTES
+                     if attribute not in ledger.closed), None)
     if best_attribute is not None and best_value >= ASK_VALUE_FLOOR:
         chosen = best_attribute
-    elif WILDCARD not in ledger.closed:
+    elif unscored is not None:
+        chosen = unscored
+    elif (ledger.wildcard_uses < MAX_OPEN_QUESTIONS
+            and WILDCARD not in ledger.closed):
         chosen = WILDCARD
+    elif best_attribute is not None and best_value > 0.0:
+        chosen = best_attribute
     else:
         return None
     return chosen if chosen in ALLOWED_ATTRIBUTES else None

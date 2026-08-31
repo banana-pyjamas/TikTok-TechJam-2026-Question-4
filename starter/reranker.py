@@ -8,7 +8,7 @@ HEAD +0.2419. The problem is ORDER, and this file is the layer that reorders.
 
 (Those are the pre-Phase-14 figures, quoted as the motivation they were, and
 they are now history twice over. With this stage ON the same gate reported
-57/149 converting; with Phase 15 in front of it, 169/194 convert and 89
+57/149 converting; with Phase 15 in front of it, 170/195 convert and 112
 rather than 176 sit at rank 11-50. Every one of those moves whenever
 anything upstream moves, so they are regenerated rather than remembered:
 `python3 -m tools.phase13_dense_gate` prints them.
@@ -74,12 +74,12 @@ bound work that happens before a scorer exists, and ``build_scorer`` is that
 work: two indexed queries over the whole 300-candidate pool. Measured, they
 are the expensive half by a factor of 35 --
 
-    scorer.order   mean 0.106 ms/turn      (inside the budget)
-    build_scorer   mean 3.422 ms/turn      (outside it)
-    stage total    mean 3.528 ms/turn
+    scorer.order   mean 0.103 ms/turn      (inside the budget)
+    build_scorer   mean 3.027 ms/turn      (outside it)
+    stage total    mean 3.129 ms/turn
 
 -- and the phase first quoted only the first line, which understated the
-stage's cost by 35x (D Phase 14 review). ``safe_build_scorer`` makes the
+stage's cost by 30x (D Phase 14 review). ``safe_build_scorer`` makes the
 build TOTAL, so a failure there degrades to CP 14.5 instead of losing the
 turn; making it FAST is the problem of whoever vendors a real encoder, and
 they have to bound the load as well as the scoring. Both numbers are printed
@@ -98,20 +98,20 @@ from starter.text import terms
 # Ablation flag (CP 14.6). ON, measured -- `python3 -m tools.phase14_reranker`
 # reproduces all of this.
 #
-#   OFF        HR 0.7400  MRR 0.519024  MTTC 5.325  TS 0.639207
-#   ON         HR 0.8450  MRR 0.582419  MTTC 4.525  TS 0.726726   +0.087519
-#   PLACEBO    5 draws, TS 0.407034 .. 0.448645   highest draw    -0.190562
+#   OFF        HR 0.7150  MRR 0.500435  MTTC 5.990  TS 0.607830
+#   ON         HR 0.8500  MRR 0.580597  MTTC 4.810  TS 0.722979   +0.115149
+#   PLACEBO    5 draws, TS 0.394443 .. 0.428537   highest draw    -0.179293
 #
-#   ON vs OFF        +21   22/1 discordant   p = 0.0000   established
+#   ON vs OFF        +27   28/1 discordant   p = 0.0000   established
 #   ON vs PLACEBO    established against ALL FIVE draws, p = 0.0000 on every
-#                    one (47/1, 48/1, 49/0, 59/0, 51/0). ON beats the best
-#                    draw by +0.2781.
+#                    one (53/2, 56/1, 58/2, 62/0, 56/0). ON beats the best
+#                    draw by +0.2944.
 #
 # PHASE 15 MADE THIS STAGE STRONGER, NOT REDUNDANT, and the numbers above are
 # the second measurement rather than the first. At Phase 14 this was +0.0617
 # (15/0) and the ON-vs-placebo comparison could not clear 0.05 against the
 # luckiest draw. With clarification in front of it the same code measures
-# +0.0875 (22/1) and beats every placebo draw at p = 0.0000.
+# +0.1151 (28/1) and beats every placebo draw at p = 0.0000.
 #
 # The reason is the whole thesis of this file. PoolTermScorer ranks on the
 # shopper's free text, and before Phase 15 the shopper barely produced any:
@@ -146,11 +146,11 @@ from starter.text import terms
 # the turns where the target sits inside the window:
 #
 #            in window   mean rank    up   down   into top 10   pushed out
-#   ON             221   12.3-> 7.7   96      5            38            1
-#   PLACEBO      294-320   ~12->~18  24-30 218-230        15-18        74-93
+#   ON             234   14.1-> 8.6  112      5            50            2
+#   PLACEBO      327-366   ~14->~19  26-34 234-263        16-18        65-89
 #
-# Real terms move the target up 96 times and down 5. Every placebo draw moves
-# it DOWN on 218-230 turns and pushes it out of the top 10 on 74 to 93.
+# Real terms move the target up 112 times and down 5. Every placebo draw
+# moves it DOWN on 234-263 turns and pushes it out of the top 10 on 65 to 89.
 # The scores are one sample of a noisy statistic; this is what the mechanism
 # does on every turn, and the two arms are not the same phenomenon. An
 # earlier version of this stage scored +0.024 while moving the target DOWN on
@@ -162,11 +162,11 @@ from starter.text import terms
 # the stage can reorder only what was already being shown.
 #
 #   top_n     TS        vs OFF     McNemar vs OFF
-#      10   0.659781   +0.020574   0/0    p = 1.0000  <- control, exactly null
-#      20   0.677499   +0.038292   8/1    p = 0.0391
-#      50   0.726726   +0.087519  22/1    p = 0.0000  <- committed
-#     100   0.758418   +0.119211  29/0    p = 0.0000
-#     200   0.771381   +0.132174  33/0    p = 0.0000
+#      10   0.628310   +0.020480   0/0    p = 1.0000  <- control, exactly null
+#      20   0.664974   +0.057144  12/2    p = 0.0129
+#      50   0.722979   +0.115149  28/1    p = 0.0000  <- committed
+#     100   0.737171   +0.129341  32/1    p = 0.0000
+#     200   0.759659   +0.151829  37/0    p = 0.0000
 #
 # Established at 20, 50, 100 and 200; null at the control. Five comparisons,
 # so at a Bonferroni alpha/5 = 0.01 the top three still clear (20 does not). What carries it
@@ -179,7 +179,7 @@ USE_SEMANTIC_RERANK = True
 #
 # 50, which is NOT the best-scoring row above -- and the gap has grown twice
 # now. The sweep no longer decays at 200 at all: 100 measures +0.032 TS
-# better than 50 and 200 another +0.013 on top. Taking either would mean
+# better than 50 and 200 another +0.023 on top. Taking either would mean
 # selecting a maximum on the same 200 sessions the score is then reported on,
 # AFTER seeing the sweep -- a worse version of the same trade each time the
 # gap widens, not a better one. The widening is itself a reason for caution:
@@ -187,11 +187,11 @@ USE_SEMANTIC_RERANK = True
 # is a value being fitted to this pipeline. 50 was chosen a priori, before any sweep ran, from Phase 13's
 # measured rank distribution -- 176 of the 367 eligible-turn pool hits sit at
 # final rank 11-50, the largest single band a reordering layer can reach --
-# and it lands inside the established plateau with almost nothing lost (22
+# and it lands inside the established plateau with almost nothing lost (28
 # gained, 1 lost). An a-priori value inside a broad established plateau
 # generalizes better than a peak picked off the plateau's own chart.
 #
-# The +0.032 at 100 is left on the table deliberately and recorded here so the
+# The +0.014 at 100 is left on the table deliberately and recorded here so the
 # choice is auditable rather than quietly optimal. Whoever revisits it should
 # revisit it with a held-out split, not with this table.
 #

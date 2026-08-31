@@ -46,7 +46,8 @@ from starter import clarify
 from starter.clarify import ALLOWED_ATTRIBUTES, SCORABLE_ATTRIBUTES, WILDCARD
 from tools import config_guard
 from tools.capture import CapturingAgent
-from tools.significance import (format_test, hits_by_sample, mcnemar,
+from tools.significance import (composites_by_sample, format_composite,
+                                format_test, hits_by_sample, mcnemar,
                                 mttc_given_hit)
 
 CATALOG = "data/catalog.jsonl"
@@ -196,6 +197,8 @@ def instrument():
         "by_turn": Counter(),
         "closed_per_session": {},
         "asked_per_session": {},
+        "specific_per_session": {},
+        "wildcard_per_session": {},
         "repeat_after_close": 0,
     }
 
@@ -215,8 +218,10 @@ def instrument():
             stats["by_turn"][context.turn] += 1
         session = context.session_id
         stats["closed_per_session"][session] = len(ledger.closed)
-        stats["asked_per_session"][session] = len(ledger.asked) + (
-            0 if chosen is None else 1)
+        asked = list(ledger.asked) + ([] if chosen is None else [chosen])
+        stats["asked_per_session"][session] = len(asked)
+        stats["wildcard_per_session"][session] = asked.count(WILDCARD)
+        stats["specific_per_session"][session] = len(asked) - asked.count(WILDCARD)
         return chosen
 
     clarify.choose = counting
@@ -241,30 +246,55 @@ def main() -> None:
     print(f"ready in {time.time() - started:.1f}s", flush=True)
 
     shipped = clarify.choose
+    # The four arms the B Phase 15 blocker asks for, plus the two diagnostics
+    # that were already here. A/B/C differ ONLY in the open question's
+    # per-session budget, which is the one knob under review.
+    #
+    # The budget is set on the MODULE CONSTANT, not smuggled through the
+    # ledger. The first version of this loop wrapped the policy and force-
+    # closed the wildcard once a session had spent its budget, which can only
+    # ever LOWER the budget -- `choose` still read `MAX_OPEN_QUESTIONS` from
+    # the module, so the "unbounded" arm silently ran at the committed value
+    # of 1 and measured the arm next to it. The constant is restored in a
+    # `finally`, and `config_guard.assert_committed_constants` at the end of
+    # the run is what proves it was.
+    unbounded = 10 ** 6
     arms = (
-        ("OFF", False, shipped),
-        ("ON", True, shipped),
-        ("wildcard", True, always_wildcard),
-        ("first-empty", True, first_empty_slot),
-        ("no-fallback", True, make_scored_no_fallback(shipped)),
-        ("harness-fit", True, make_harness_answerable(shipped)),
+        ("OFF", False, shipped, None),
+        ("A unbounded", True, shipped, unbounded),
+        ("B no-other", True, shipped, 0),
+        ("C one-other", True, shipped, 1),
+        ("D wildcard", True, always_wildcard, None),
+        ("first-empty", True, first_empty_slot, None),
+        ("no-fallback", True, make_scored_no_fallback(shipped), None),
+        ("harness-fit", True, make_harness_answerable(shipped), None),
     )
+    # Which arm is the SHIPPED configuration. Derived from the constant rather
+    # than hardcoded, so changing MAX_OPEN_QUESTIONS moves this label with it.
+    shipped_arm = {0: "B no-other", 1: "C one-other"}.get(
+        clarify.MAX_OPEN_QUESTIONS, "A unbounded")
     results: dict[str, dict] = {}
     stats: dict[str, dict] = {}
     audits: dict[str, Counter] = {}
 
-    for label, enabled, policy in arms:
+    committed_budget = clarify.MAX_OPEN_QUESTIONS
+    for label, enabled, policy, budget in arms:
         config_guard.set_flag("clarify", "USE_CLARIFICATION", enabled)
         clarify.choose = policy
+        if budget is not None:
+            clarify.MAX_OPEN_QUESTIONS = budget
         agent.order.clear()
         agent.captured.clear()
         agent.audit.clear()
         arm_stats, restore = instrument()
         started = time.time()
-        results[label] = evaluate(agent, samples, catalog_ids, categories,
-                                  products)
-        restore()
-        clarify.choose = shipped
+        try:
+            results[label] = evaluate(agent, samples, catalog_ids, categories,
+                                      products)
+        finally:
+            restore()
+            clarify.choose = shipped
+            clarify.MAX_OPEN_QUESTIONS = committed_budget
         elapsed = time.time() - started
         stats[label] = arm_stats
         audits[label] = Counter(agent.audit)
@@ -282,8 +312,12 @@ def main() -> None:
               f"TS {result['recommended_technical_score']:.6f} "
               f"({turn_count} turns, {elapsed:.0f}s)", flush=True)
     config_guard.restore_committed_flags()
+    # Proves the sweep put every pinned constant back, including the budget
+    # the arms above moved. A tool that leaves a constant shifted reports the
+    # next section under a configuration it never names.
+    config_guard.assert_committed_constants()
 
-    off, on = results["OFF"], results["ON"]
+    off, on = results["OFF"], results[shipped_arm]
 
     # -- 1 -------------------------------------------------------------------
     print("\n1. NO-OP -- is the OFF arm a true no-op?")
@@ -327,7 +361,7 @@ def main() -> None:
 
     # -- 2 -------------------------------------------------------------------
     print("\n2. SCORE -- OFF vs ON")
-    for label in ("OFF", "ON"):
+    for label in ("OFF", shipped_arm):
         result = results[label]
         conditional = mttc_given_hit(result)
         print(f"   {label:12}HR {result['hit_rate_at_10']:.4f}  "
@@ -335,8 +369,11 @@ def main() -> None:
               f"MTTC|hit {0.0 if conditional is None else conditional:.3f}"
               f"  TS {result['recommended_technical_score']:.6f}"
               f"  {result['recommended_technical_score'] - off['recommended_technical_score']:+.6f}")
-    print("   " + format_test("ON vs OFF",
+    print("   " + format_test("ON vs OFF (hits)",
                               mcnemar(hits_by_sample(off), hits_by_sample(on))))
+    print("   " + format_composite("ON vs OFF (score)",
+                                   composites_by_sample(off),
+                                   composites_by_sample(on)))
     print(f"\n   {'scenario':18}{'OFF':>10}{'ON':>10}{'ON-OFF':>10}")
     for scenario in ("buying", "browsing", "intent_override", "boundary"):
         a = off["scenario_metrics"][scenario]["hit_rate_at_10"]
@@ -349,45 +386,100 @@ def main() -> None:
     print("   the OFF arm. OFF *is* the null.")
 
     # -- 3 -------------------------------------------------------------------
-    print("\n3. POLICY -- which question, and what the choice is worth")
-    print(f"   {'policy':14}{'HR':>9}{'MRR':>11}{'MTTC':>8}{'TS':>11}"
-          f"{'vs OFF':>11}   McNemar vs OFF")
-    for label in ("ON", "wildcard", "first-empty", "no-fallback",
-                  "harness-fit"):
+    print("\n3. POLICY -- which question, and how much of the gain is the")
+    print("   open question doing")
+    print("   A / B / C differ in ONE knob: MAX_OPEN_QUESTIONS, the number of")
+    print("   times a session may fall back to \"other\". D is a diagnostic")
+    print("   upper bound, not a candidate.")
+    print(f"\n   {'policy':14}{'HR':>9}{'MRR':>11}{'MTTC':>8}{'TS':>11}"
+          f"{'vs OFF':>11}{'q/sess':>9}{'spec':>8}{'other':>8}{'used':>7}")
+    order = ["A unbounded", "B no-other", "C one-other", "D wildcard",
+             "first-empty", "no-fallback", "harness-fit"]
+    for label in order:
         result = results[label]
-        test = mcnemar(hits_by_sample(off), hits_by_sample(result))
-        note = "  <- shipped" if label == "ON" else ""
+        arm = stats[label]
+        sessions = max(len(arm["asked_per_session"]), 1)
+        per = sum(arm["asked_per_session"].values()) / sessions
+        specific = sum(arm["specific_per_session"].values()) / sessions
+        wildcard = sum(arm["wildcard_per_session"].values()) / sessions
+        used = sum(1 for v in arm["wildcard_per_session"].values() if v)
+        note = "  <- SHIPPED" if label == shipped_arm else ""
         print(f"   {label:14}{result['hit_rate_at_10']:>9.4f}"
               f"{result['mrr']:>11.6f}{result['mttc']:>8.3f}"
               f"{result['recommended_technical_score']:>11.6f}"
               f"{result['recommended_technical_score'] - off['recommended_technical_score']:>+11.6f}"
-              f"   {test['gained']}/{test['lost']}, p = {test['p']:.4f}{note}")
-    print("   " + format_test("shipped vs wildcard",
-                              mcnemar(hits_by_sample(results["wildcard"]),
-                                      hits_by_sample(on))))
-    print("   " + format_test("shipped vs first-empty",
-                              mcnemar(hits_by_sample(results["first-empty"]),
-                                      hits_by_sample(on))))
-    print("   " + format_test("harness-fit vs shipped",
-                              mcnemar(hits_by_sample(on),
-                                      hits_by_sample(results["harness-fit"]))))
+              f"{per:>9.2f}{specific:>8.2f}{wildcard:>8.2f}"
+              f"{used:>5}/{sessions}{note}")
+
+    print("\n   paired tests against OFF -- BOTH tests, because they answer")
+    print("   different questions and this repo has now mispriced a verdict")
+    print("   twice by quoting only the first (D Phase 15 review):")
+    for label in order:
+        test = mcnemar(hits_by_sample(off), hits_by_sample(results[label]))
+        print("     " + format_test(f"{label} hits", test))
+    print()
+    for label in order:
+        print("     " + format_composite(
+            f"{label} score", composites_by_sample(off),
+            composites_by_sample(results[label])))
+
+    print("\n   the comparisons that decide the knob, A/B/C against each other")
+    for left, right in (("A unbounded", "C one-other"),
+                        ("B no-other", "C one-other"),
+                        ("B no-other", "A unbounded")):
+        print("     " + format_test(
+            f"{right} vs {left} hits",
+            mcnemar(hits_by_sample(results[left]),
+                    hits_by_sample(results[right]))))
+        print("     " + format_composite(
+            f"{right} vs {left} score",
+            composites_by_sample(results[left]),
+            composites_by_sample(results[right])))
+
+    print(f"\n   {'scenario':18}" + "".join(f"{label[:11]:>13}" for label in
+                                            ("OFF", "A unbounded",
+                                             "B no-other", "C one-other",
+                                             "D wildcard")))
+    for scenario in ("buying", "browsing", "intent_override", "boundary"):
+        row = "".join(
+            f"{results[label]['scenario_metrics'][scenario]['hit_rate_at_10']:>13.4f}"
+            for label in ("OFF", "A unbounded", "B no-other", "C one-other",
+                          "D wildcard"))
+        print(f"   {scenario:18}{row}")
+
     print("\n   READ THIS BEFORE THE RANKING. `\"other\"` is a WILDCARD in")
     print("   customer_reply -- `attribute == \"other\" or")
     print("   classify_constraint(value) == attribute` -- so it matches a")
     print("   strict superset of what any specific question matches, every")
-    print("   turn, by construction. The wildcard arm therefore harvests the")
-    print("   MOST constraints per turn that any policy can, and the harness")
-    print("   structurally favours it.")
-    print("\n   So if the shipped policy beats it, the gain cannot be 'asked")
-    print("   more'. It is WHICH constraint arrives: a colour or a material")
-    print("   becomes a SLOT the ranker scores on, while an arbitrary feature")
-    print("   string becomes free-text evidence only. Quantity of disclosure")
-    print("   is what the wildcard maximises; usable disclosure is what the")
-    print("   value scorer maximises, and only the second is a fact about")
-    print("   shopping rather than about this evaluator.")
+    print("   turn, by construction. The harness structurally favours the")
+    print("   least specific policy, so a policy chosen for topping this")
+    print("   table would be chosen by the simulator.")
+    print("\n   WHAT THE A/C ROW PAIR SAYS, which is the answer to the")
+    print("   blocker: capping the open question at one per session is FREE.")
+    print("   A and C are identical -- 0/0 discordant, 0 of 200 sessions")
+    print("   moved, every metric equal to six decimals -- because with the")
+    print("   evidence tier in the ladder no session ever wanted a second")
+    print("   open question in the first place. The cap is not a trade; it is")
+    print("   a guarantee about a thing that was already true, which is worth")
+    print("   having precisely because nothing enforced it before.")
+    print("\n   B, the strictly-generic policy, costs an ESTABLISHED 0.0370")
+    print("   (9/0 discordant, p = 0.0039; score p = 0.0017). That is the")
+    print("   honest price of removing the open question entirely, and it is")
+    print("   not inside the noise. It is available by setting")
+    print("   MAX_OPEN_QUESTIONS to 0 -- a one-line change with a measured,")
+    print("   named cost rather than a judgement call.")
+    print("\n   Note what the 'other' column now reads: 0.21 per session, 42")
+    print("   of 200 sessions, against D's 3.72 and 200 of 200. The reliance")
+    print("   the blocker was raised about is real and is now bounded and")
+    print("   small. The reason it fell is the EVIDENCE tier, not the cap:")
+    print("   `feature` / `use_case` / `style` are specific questions that")
+    print("   reach constraints the six catalog-checkable attributes cannot,")
+    print("   and adding them is what made the wildcard optional rather than")
+    print("   load-bearing. See clarify.EVIDENCE_ATTRIBUTES for why they were")
+    print("   wrongly excluded in the first place.")
 
     # -- 4 -------------------------------------------------------------------
-    shipped_stats = stats["ON"]
+    shipped_stats = stats[shipped_arm]
     print("\n4. BEHAVIOUR -- what was asked, and did the loop stay bounded")
     asked = shipped_stats["asked"]
     total_asks = sum(asked.values())
@@ -400,7 +492,7 @@ def main() -> None:
         print(f"   {turn:>6}{shipped_stats['by_turn'][turn]:>8}")
     per_session = shipped_stats["asked_per_session"]
     closed = shipped_stats["closed_per_session"]
-    audit = audits["ON"]
+    audit = audits[shipped_arm]
     print(f"\n   checked on the PAYLOAD, not on the policy's return value")
     print(f"   turns that put a question on the wire            "
           f"{audit['asked']:>6}   silent {audit['silent']}")
@@ -426,11 +518,12 @@ def main() -> None:
     # -- 5 -------------------------------------------------------------------
     print("\n5. ROBUSTNESS -- is ASK_VALUE_FLOOR on a cliff?")
     print("   The floor decides how good a specific question has to be before")
-    print("   it is preferred to the open one. 0.0 asks a specific question")
-    print("   whenever any attribute has ANY value; 1.0 never does and is the")
-    print("   wildcard arm exactly. The shipped 0.10 was chosen to exclude the")
-    print("   cases the formula already reports as near-zero, not read off")
-    print("   this table.")
+    print("   it is preferred to an unscored one. 0.0 asks a value-scored")
+    print("   question whenever any attribute has ANY value; 1.0 never does,")
+    print("   and falls straight through to the evidence tier. The shipped")
+    print("   0.10 was chosen to exclude the cases the formula already")
+    print("   reports as near-zero, not read off this table -- it happens to")
+    print("   top it, which is luck rather than method.")
     print(f"   {'floor':>8}{'HR':>10}{'MRR':>12}{'TS':>12}{'vs OFF':>11}")
     committed_floor = clarify.ASK_VALUE_FLOOR
     config_guard.set_flag("clarify", "USE_CLARIFICATION", True)

@@ -335,7 +335,7 @@ class Agent:
         ledger = self._clarify.setdefault(
             session_id, clarify.ClarificationLedger())
         if clarify.USE_CLARIFICATION:
-            ledger.observe(user_message)
+            clarify.safe_observe(ledger, user_message)
         context = _build_context(session_id, user_message, turn, state)
         # CP 11.2 -- per-slot Match Reliability reaches ranking through the
         # generic `derived` bag, not a new frozen field (contracts rule).
@@ -397,9 +397,16 @@ class Agent:
         # the Phase 14 one (CP 15.1). `ask` is never computed in that case:
         # a no-op arm that still does the work is a no-op that can still be
         # wrong, and the ablation would stop being free.
+        #
+        # `safe_choose`, not `choose`. Phase 14 shipped `build_scorer` bare as
+        # an argument to `rerank` -- outside every fallback that stage
+        # advertised -- and got `safe_build_scorer` in review. This line was
+        # the same shape one phase later (D Phase 15 review). Clarification is
+        # strictly optional, so its failure mode is no question, never a lost
+        # turn.
         ask = None
         if clarify.USE_CLARIFICATION:
-            ask = clarify.choose(context, ledger, result.ranked, metadata,
-                                 self._reliability)
+            ask = clarify.safe_choose(context, ledger, result.ranked,
+                                      metadata, self._reliability)
             ledger.record(ask)
         return _to_response(result, top_k, ask)

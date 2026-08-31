@@ -42,5 +42,93 @@ class PercentilesTest(unittest.TestCase):
         self.assertEqual(tuple(percentiles([])), (0.0, 0.0, 0.0, 0.0))
 
 
+
+class SessionCompositeTest(unittest.TestCase):
+    """The composite must BE the score, not a proxy for it.
+
+    A paired permutation over per-session composites is only a test about
+    TechnicalScore if averaging the composites reproduces TechnicalScore. If
+    the two ever drift, the permutation quietly starts answering a different
+    question and nothing else in the repo would notice.
+    """
+
+    def _sessions(self):
+        return [
+            {"sample_id": "a", "hit": True, "first_hit_turn": 1,
+             "reciprocal_rank": 1.0},
+            {"sample_id": "b", "hit": True, "first_hit_turn": 7,
+             "reciprocal_rank": 0.125},
+            {"sample_id": "c", "hit": False, "first_hit_turn": None,
+             "reciprocal_rank": 0.0},
+            {"sample_id": "d", "hit": True, "first_hit_turn": 10,
+             "reciprocal_rank": 0.5},
+        ]
+
+    def test_the_mean_composite_is_the_technical_score(self) -> None:
+        from evaluator.local_evaluator import metric_summary
+        from tools.significance import session_composite
+
+        sessions = self._sessions()
+        overall = metric_summary(sessions)
+        efficiency = max(0.0, min(1.0, (11.0 - float(overall["mttc"])) / 10.0))
+        evaluator_ts = (0.50 * overall["hit_rate_at_10"]
+                        + 0.30 * overall["mrr"] + 0.20 * efficiency)
+        mean_composite = sum(session_composite(s) for s in sessions) / len(sessions)
+        self.assertAlmostEqual(mean_composite, evaluator_ts, places=9)
+
+    def test_the_weights_match_the_evaluator(self) -> None:
+        # The weights are duplicated in significance.py so it stays importable
+        # without the evaluator. Duplication is fine; drift is not.
+        import inspect
+
+        from evaluator import local_evaluator
+        from tools import significance
+
+        source = inspect.getsource(local_evaluator.evaluate)
+        self.assertIn("0.50 * overall[\"hit_rate_at_10\"]", source)
+        self.assertIn("0.30 * overall[\"mrr\"]", source)
+        self.assertIn("0.20 * efficiency", source)
+        self.assertEqual(
+            (significance._W_HIT, significance._W_MRR, significance._W_EFF),
+            (0.50, 0.30, 0.20))
+        self.assertEqual(significance._MAX_TURNS, local_evaluator.MAX_TURNS)
+
+    def test_a_miss_is_charged_the_evaluator_penalty(self) -> None:
+        from tools.significance import session_composite
+
+        miss = session_composite({"hit": False, "first_hit_turn": None,
+                                  "reciprocal_rank": 0.0})
+        self.assertEqual(miss, 0.0)
+
+    def test_permutation_and_bootstrap_are_reproducible(self) -> None:
+        from tools.significance import bootstrap_ci, paired_permutation
+
+        before = {str(i): float(i % 3) for i in range(200)}
+        after = {str(i): float(i % 3) + (0.1 if i % 5 else -0.05)
+                 for i in range(200)}
+        self.assertEqual(paired_permutation(before, after),
+                         paired_permutation(before, after))
+        self.assertEqual(bootstrap_ci(before, after),
+                         bootstrap_ci(before, after))
+
+    def test_permutation_never_claims_certainty(self) -> None:
+        # (1 + extreme) / (1 + rounds) can never be 0.0 -- 10k resamples do
+        # not license a p of exactly zero.
+        from tools.significance import paired_permutation
+
+        before = {str(i): 0.0 for i in range(200)}
+        after = {str(i): 1.0 for i in range(200)}
+        self.assertGreater(paired_permutation(before, after)["p"], 0.0)
+
+    def test_an_unchanged_run_is_no_verdict(self) -> None:
+        from tools.significance import bootstrap_ci, paired_permutation
+
+        same = {str(i): float(i) for i in range(200)}
+        test = paired_permutation(same, dict(same))
+        self.assertEqual(test["moved"], 0)
+        self.assertEqual(test["p"], 1.0)
+        interval = bootstrap_ci(same, dict(same))
+        self.assertEqual((interval["low"], interval["high"]), (0.0, 0.0))
+
 if __name__ == "__main__":
     unittest.main()

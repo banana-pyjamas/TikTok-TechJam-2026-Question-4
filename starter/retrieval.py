@@ -113,8 +113,8 @@ DEFAULT_ROUTES = ("bm25", "category")
 # contribute unique candidates through a union. The UNION is the question,
 # and it is worse rather than neutral: -11 sessions at @50 (2/13 discordant,
 # p = 0.0074) and -11 at @100 (1/12, p = 0.0034), no verdict at @300 (1/2).
-# The lexical route adds 113.3 unique candidates per turn and pushes cap loss
-# from 126.4 to 239.7 discarded candidates per turn; what it displaces is
+# The lexical route adds 114.9 unique candidates per turn and pushes cap loss
+# from 130.3 to 245.2 discarded candidates per turn; what it displaces is
 # worth more than what it adds. OFF on measurement, not on principle.
 #
 # The recall and McNemar rows above are pure retrieval and do not move when
