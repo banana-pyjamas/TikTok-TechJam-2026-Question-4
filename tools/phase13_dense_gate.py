@@ -26,14 +26,14 @@ C        SCOPE.  Both terms of the headline "120 in-pool losses = 3.2x the
          number and nothing downstream can change it -- but the QUERY is not
          downstream. Once the agent asks and the shopper answers, retrieval
          is searching on real constraints: 5 sessions never retrieve the
-         target rather than 51, in-pool conversion is 87.2% rather than
-         38.3%, and the conversion ratio is 5.0x on a collapsed base rather
+         target rather than 51, in-pool conversion is 92.3% rather than
+         38.3%, and the conversion ratio is 3.0x on a collapsed base rather
          than 1.8x. Section 1 prints the live figures; the ones written here
          are dated on purpose rather than maintained, because a docstring
          that quotes a moving number is the exact failure D's Phase 14
          Finding 3 catalogued.
 
-         Read the direction, not the ratio: 5.0x looks worse than 1.8x and
+         Read the direction, not the ratio: 3.0x looks worse than 1.8x and
          is much better news. Retrieval's headroom fell from +0.2550 recall
          to +0.0250; the ratio rose because its denominator nearly vanished.
 
@@ -399,7 +399,7 @@ def first_scoring_turn(sample: dict, products: dict[str, dict]) -> int:
     understates the number of sessions retrieval actually loses (38 -> 51)
     and overstates the conversion failure relative to it (3.2x -> 2.1x at
     the time). Section 1 prints the live pair, which has moved twice since:
-    1.8x after Phase 14 and 5.0x after Phase 15, the second because
+    1.8x after Phase 14 and 3.0x after Phase 15 + depth 200, the second because
     clarification collapsed the denominator rather than because ranking got
     worse.
 

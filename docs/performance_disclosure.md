@@ -34,13 +34,13 @@ ranking, reranking, clarification and payload construction:
 
 | | |
 | --- | --- |
-| turns measured | 932 |
-| mean | **43.19 ms** |
-| median | 36.59 ms |
-| P90 | 76.17 ms |
-| max | 184.08 ms |
-| index build (once, at construction) | 16.74 s |
-| whole 200-session run | 40.4 s |
+| turns measured | 858 |
+| mean | **48.67 ms** |
+| median | 40.71 ms |
+| P90 | 82.18 ms |
+| max | 213.29 ms |
+| index build (once, at construction) | 16.89 s |
+| whole 200-session run | 41.9 s |
 
 The index build is a one-time startup cost: the 50k-product catalog is read
 once and loaded into an in-memory SQLite FTS5 index plus a signals side
@@ -55,9 +55,10 @@ is stated rather than implied:
 | platform | macOS-26.6.2-arm64 |
 | machine | arm64 |
 
-On a faster development interpreter (3.12.2, same machine) the same run
-takes roughly 28 s with a ~30 ms mean turn. Neither figure should be read as
-a guarantee about the organizer's hardware. What **is** a property of the
+A modern CPython on the same machine is not uniformly faster: 3.12.2 runs
+this in ~53 s at a ~62 ms mean turn, because the deeper rerank window costs
+more per turn than the interpreter saves. Neither figure should be read as a
+guarantee about the organizer's hardware. What **is** a property of the
 code, and does transfer: the work per turn is bounded and fixed — two FTS
 queries, one indexed metadata lookup over at most 300 candidates, two
 vocabulary queries for the reranker, and pure-Python scoring. There is no
@@ -67,14 +68,15 @@ that can hang one.
 The one stage with an explicit budget is the reranker
 (`RERANK_BUDGET_MS = 150`), which bounds the scorer call and falls back to
 the ranking order if it overruns. Over the whole public set it overruns
-**0** times; the scorer itself costs ~0.1 ms per turn, and its setup ~3.4 ms.
+**0** times at every depth measured, including the shipped 200; the scorer
+itself costs ~0.39 ms per turn (P90 0.49, max 1.60) and its setup ~3.1 ms.
 
 ## Memory
 
 | | |
 | --- | --- |
 | peak traced, after index build | 5 MiB |
-| peak traced, whole run | 198 MiB |
+| peak traced, whole run | 176 MiB |
 
 These are Python-object allocations only. The catalog lives inside SQLite's
 own in-memory pages, which `tracemalloc` does not see, so treat both figures

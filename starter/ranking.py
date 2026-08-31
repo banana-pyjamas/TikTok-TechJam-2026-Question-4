@@ -163,88 +163,85 @@ DIAGNOSTIC_KEYS = frozenset({
 #
 # OFF reproduces Phase 6 scoring exactly: every active slot counts 1, whatever
 # the shopper's phrasing and whatever the catalog's coverage of that field.
-#
-# ON, each slot's contribution is scaled by Evidence Confidence (how firmly the
-# shopper asserted it, from state.slots[slot]["confidence"]) times Match
+# ON, each slot's contribution is scaled by Evidence Confidence (how firmly
+# the shopper asserted it, from state.slots[slot]["confidence"]) times Match
 # Reliability (how much the catalog's verdict on that field is worth, from
 # reliability.match_reliability). See ``constraint_weights`` for the three
 # quadrants and ``score_candidate`` for the arithmetic.
 #
-# OFF, and the reason is NOT that the weighting does nothing. It does a great
-# deal; it just does it where the evaluator cannot see.
+# REWRITTEN AT PHASE 16 because four generations of edits had left it
+# contradicting itself in four places: two different counts for the CP 11.4
+# census, a target-movement figure asserted as both 0 and 19, "no measured
+# harm" beside "a point estimate on the wrong side of zero", and a
+# pre-Phase-15 paragraph claiming the target "never moved a single position"
+# fifteen lines under a table saying it moved (D Phase 16 review). Every
+# number below is one run of `python3 -m tools.phase11_confidence` against
+# the committed configuration, and each fact is stated once.
 #
-# Measured directly by ranking each live turn's pool BOTH ways and diffing the
-# orders (``python3 -m tools.phase11_confidence``):
+#   OFF   HR 0.9000   MRR 0.591530   MTTC 4.390   TS 0.759659
+#   ON    HR 0.9000   MRR 0.591058   MTTC 4.355   TS 0.760217   +0.000558
+#   McNemar 0/0 discordant, p = 1.0000 -- IDENTICAL hit set
 #
-#   turns with a candidate-order change      513 /  929   55.2%
-#   turns where the TARGET's rank moved       16 /  380    4.2%
-#   sessions gained / lost                       1 / 1     p = 1.0000
+#   turns with any candidate-order change     451 / 851   53.0%
+#   turns where the TARGET's rank moved        12 / 365    3.3%
+#   CP 11.4 (firmly meant, poorly attested)    53          4.9%
 #
-# PHASE 15 REVIVED THIS MECHANISM, AND THE ARGUMENT BELOW HAD TO CHANGE WITH
-# IT. Until clarification landed, this flag was measured EXACTLY inert: no
-# target ever moved a single position, and the case CP 11.4 exists for
-# (firmly meant, poorly attested) occurred 4 times in 1536 constraint
-# occurrences. With the shopper actually disclosing preferences there are
-# 3-constraint turns for the first time, weights differ between slots on 40%
-# of turns, CP 11.4's case occurs 86 times in 1146 (7.5%), and the target's
-# rank moves on 19 turns.
+# WHAT THE NUMBERS SAY, AND IT IS NOT WHAT EARLIER VERSIONS SAID.
 #
-# So "no measured harm because it does nothing" is no longer available AT
-# THE TOP OF THE STACK. It now does something there, and what it does
-# measures -0.001737 TS at 1/1 discordant, p = 1.0000 -- no verdict, and a
-# point estimate on the wrong side of zero.
+# The mechanism is live: it reorders half of all turns and moves the hidden
+# target on 12 of them. It is not inert, and the old "ships OFF because it
+# does nothing" is gone for good.
 #
-# On CORE it is still exactly inert, and Phase 16's ladder is the cleanest
-# demonstration this repo has: enabled at its own rung, over core alone, it
-# reproduces the previous rung to six decimals with 0/0 discordant and 0 of
-# 200 sessions moved. Both statements are true of the same code, and the
-# difference between them is everything Phase 15 put into the dialogue --
-# the mechanism needs constraints to weigh, and until the agent asked, there
-# were none. Same shipping decision, different and weaker reason: it used
-# to ship OFF because it was inert, and it ships OFF now because the burden
-# is on the change and a live mechanism with a negative point estimate has
-# not met it.
+# It also does not change WHICH sessions hit -- 0/0 discordant, the same 180
+# targets found either way. The entire +0.000558 comes from MRR and MTTC on
+# sessions that were already won, and the point estimate is now on the
+# POSITIVE side of zero, having been negative before the rerank window moved
+# to 200. A quantity whose sign depends on an unrelated constant is not a
+# quantity anyone should ship on.
 #
-# So the aggregates being identical to six decimals is a fact about the top of
-# the list, not about the ranking. Three in a thousand turns reorder the Top-10
-# at all, and across every turn where the target was in the pool it never moved
-# a single position. An earlier version of this comment reported the aggregates
-# as proof that "no target's rank moved anywhere"; the aggregates cannot show
-# that, and it needed the row above to be said honestly (B Phase 11 review).
+# SO IT STAYS OFF, on the rule this repo applies to every optional layer: the
+# burden is on the change. Zero discordant sessions is the weakest possible
+# evidence for a scoring change -- it means the benchmark cannot see it -- and
+# a +0.0006 point estimate that flipped sign under an unrelated edit does not
+# discharge that burden. The countervailing consideration is unchanged:
+# weighting SHRINKS the attribute term, and constraint ranking is one of the
+# components McNemar establishes on this set (+6, 6/0, p = 0.0312 on the BM25
+# pool). Shrinking something that works, for a gain the benchmark cannot
+# resolve, is not a trade to make blind.
 #
-# That review also killed the argument this comment used to make -- that a
-# single-constraint turn is "a monotone rescale that cannot reorder". False:
-# ``base`` is not scaled by the weight, so shrinking the attribute term moves
-# constraint evidence relative to retrieval order, and ONE constraint suffices.
-# 146 of the 513 changed turns have exactly one active constraint. The module
-# docstring above carries the counterexample, and the same error sat in the
-# Phase 6 paragraph next to it.
+# ON CORE IT REMAINS EXACTLY INERT, which is a different claim from the one
+# above and both are true. Phase 16's ladder enables it at its own rung over
+# core alone and reproduces the rung below to six decimals: 0/0 discordant, 0
+# of 200 sessions moved, TS identical at 0.134566. The difference between
+# that and the 451 reordered turns above is everything Phase 15 put into the
+# dialogue -- the mechanism needs constraints to weigh, and until the agent
+# asked there were almost none.
 #
-# The census in the tool is still worth reading for what the mechanism had to
-# work with -- CP 11.4's case (firmly meant, poorly attested) occurs 69 times,
-# 5.7% of constraint occurrences, up from 4 in 1536 before Phase 15 -- but no
-# claim here rests on it.
+# TWO CORRECTIONS FROM THE PHASE 11 REVIEW, kept because they were arguments
+# rather than numbers, and both are still load-bearing:
 #
-# So this ships OFF on the same rule as USE_PROFILE: the burden is on the
-# change, and reordering only below the scored cut is not evidence for it.
-# Unlike USE_PROFILE there is no measured harm either -- the honest summary is
-# no evidence in either direction -- and after Phase 15 the point estimate is
-# slightly negative, which is weaker still. What tips it is that weighting
-# shrinks the attribute term, and constraint ranking is one of the components
-# McNemar establishes on this set (+6, 6/0, p = 0.0312 on the BM25 pool).
-# Shrinking something that works, for no measured gain, is not a trade to
-# make blind.
+#   * Aggregates cannot show that no target moved. An earlier comment read
+#     "the totals are identical to six decimals" as proof that nothing
+#     reordered; it proves only that the TOP of the list is stable. The
+#     target-movement row above is the measurement that can actually say it,
+#     and it says 12.
+#   * A single-constraint turn is NOT "a monotone rescale that cannot
+#     reorder". ``base`` is not scaled by the weight, so shrinking the
+#     attribute term moves constraint evidence relative to retrieval order,
+#     and one constraint suffices -- 133 of the 451 changed turns have
+#     exactly one active constraint. The module docstring carries the
+#     worked counterexample.
 #
-# Everything is built, tested (CP 11.3/11.4/11.5 in tests/test_confidence.py)
-# and one flag from live. EC itself is computed and stored regardless: it is
-# state, not scoring, and Phase 15 wants it.
+# Everything is built and tested (CP 11.3/11.4/11.5 in
+# tests/test_confidence.py) and one flag from live. EC itself is computed and
+# stored regardless: it is state, not scoring, and clarification reads it.
 USE_CONFIDENCE_WEIGHTING = False
 
 # Ablation flag for the popularity prior (Phase 12).
 #
 # ON, and it USED TO BE the largest established gain in the project. Phase 15
 # ended that: with clarification supplying real constraints the same term is
-# worth +0.0203 at 4/0 discordant, p = 0.1250 -- NO VERDICT.
+# worth +0.0175 at 3/0 discordant, p = 0.2500 -- NO VERDICT.
 #
 # That is not a regression and it is the most interesting thing this comment
 # has ever said. The popularity prior was worth +0.0477 when the agent knew
@@ -270,9 +267,9 @@ USE_CONFIDENCE_WEIGHTING = False
 # tools.phase12_popularity` regenerates all of it, and moving the pipeline
 # means re-running it and editing here in the same change.
 #
-#   OFF   HR 0.8300   MRR 0.569732   MTTC 5.160   TS 0.702720
-#   ON    HR 0.8500   MRR 0.580597   MTTC 4.810   TS 0.722979     +0.020259
-#   McNemar +4, 4/0 discordant, p = 0.1250  -- no verdict
+#   OFF   HR 0.8850   MRR 0.571796   MTTC 4.595   TS 0.742139
+#   ON    HR 0.9000   MRR 0.591530   MTTC 4.390   TS 0.759659     +0.017520
+#   McNemar +3, 3/0 discordant, p = 0.2500  -- no verdict
 #
 # tools/phase7_ablation.py reports a different figure for the same flag.
 # Both are right and they are different comparisons: the ladder ablates
@@ -282,10 +279,11 @@ USE_CONFIDENCE_WEIGHTING = False
 # prior's value to an agent that knows nothing, and this one is its value to
 # an agent that has asked. Read the scope, not only the number.
 #
-# buying 0.8500 -> 0.8625, browsing 0.8250 -> 0.8375, intent_override 0.7667
-# -> 0.8333, boundary identical. Discordant one way only (4/0), which is why
-# the point estimate is positive while the test does not clear -- four
-# sessions is not enough to establish anything on n=200.
+# buying 0.8625 -> 0.8750, browsing 0.8875 -> 0.9125; intent_override and
+# boundary identical. Discordant one way only (3/0), which is why the point
+# estimate is positive while the test does not clear -- three sessions is not
+# enough to establish anything on n=200, and the figure has fallen at every
+# re-measure as the layers above it got better at using real constraints.
 #
 # For comparison the entire Phase 0-6 stack is worth +0.0279 over the
 # baseline, so this one term is still worth more than everything before it
@@ -320,10 +318,10 @@ USE_CONFIDENCE_WEIGHTING = False
 # W_POPULARITY is 0.008, an order of magnitude below W_MATCH, exactly as
 # CP 12.4 requires. Raising it pays enormously on this benchmark:
 #
-#   W_POPULARITY   0.008 -> TS 0.723   (shipped)
-#                  0.02  -> TS 0.747
-#                  0.05  -> TS 0.802
-#                  0.10  -> TS 0.827
+#   W_POPULARITY   0.008 -> TS 0.760   (shipped)
+#                  0.02  -> TS 0.780
+#                  0.05  -> TS 0.819
+#                  0.10  -> TS 0.834
 #
 # At 0.10 popularity equals W_MATCH and a bestseller can cancel a satisfied
 # constraint outright -- which is precisely the collapse CP 12.4 forbids. The
@@ -335,7 +333,7 @@ USE_CONFIDENCE_WEIGHTING = False
 #
 # OFF: the popularity term is not computed. That is no longer "exactly the
 # pre-Phase-12 score" -- it is the rest of the CURRENT pipeline without this
-# term, which is 0.702720 today (0.187711 before Phase 15, 0.134566 when the
+# term, which is 0.742139 today (0.187711 before Phase 15, 0.134566 when the
 # ladder ended at Phase 12). The ladder figure lives in
 # tools/phase7_ablation.py, where it is labelled as history.
 USE_POPULARITY = True

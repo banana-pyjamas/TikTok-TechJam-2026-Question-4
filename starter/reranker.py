@@ -8,8 +8,8 @@ HEAD +0.2419. The problem is ORDER, and this file is the layer that reorders.
 
 (Those are the pre-Phase-14 figures, quoted as the motivation they were, and
 they are now history twice over. With this stage ON the same gate reported
-57/149 converting; with Phase 15 in front of it, 170/195 convert and 112
-rather than 176 sit at rank 11-50. Every one of those moves whenever
+57/149 converting; with Phase 15 in front of it and the window at 200,
+180/195 convert and 107 rather than 176 sit at rank 11-50. Every one of those moves whenever
 anything upstream moves, so they are regenerated rather than remembered:
 `python3 -m tools.phase13_dense_gate` prints them.
 
@@ -74,12 +74,12 @@ bound work that happens before a scorer exists, and ``build_scorer`` is that
 work: two indexed queries over the whole 300-candidate pool. Measured, they
 are the expensive half by a factor of 35 --
 
-    scorer.order   mean 0.103 ms/turn      (inside the budget)
-    build_scorer   mean 3.027 ms/turn      (outside it)
-    stage total    mean 3.129 ms/turn
+    scorer.order   mean 0.388 ms/turn      (inside the budget)
+    build_scorer   mean 3.134 ms/turn      (outside it)
+    stage total    mean 3.522 ms/turn
 
 -- and the phase first quoted only the first line, which understated the
-stage's cost by 30x (D Phase 14 review). ``safe_build_scorer`` makes the
+stage's cost by 8x (D Phase 14 review). ``safe_build_scorer`` makes the
 build TOTAL, so a failure there degrades to CP 14.5 instead of losing the
 turn; making it FAST is the problem of whoever vendors a real encoder, and
 they have to bound the load as well as the scoring. Both numbers are printed
@@ -99,19 +99,19 @@ from starter.text import terms
 # reproduces all of this.
 #
 #   OFF        HR 0.7150  MRR 0.500435  MTTC 5.990  TS 0.607830
-#   ON         HR 0.8500  MRR 0.580597  MTTC 4.810  TS 0.722979   +0.115149
-#   PLACEBO    5 draws, TS 0.394443 .. 0.428537   highest draw    -0.179293
+#   ON         HR 0.9000  MRR 0.591530  MTTC 4.390  TS 0.759659   +0.151829
+#   PLACEBO    5 draws, TS 0.169167 .. 0.210375   highest draw    -0.397455
 #
-#   ON vs OFF        +27   28/1 discordant   p = 0.0000   established
+#   ON vs OFF        +37   37/0 discordant   p = 0.0000   established
 #   ON vs PLACEBO    established against ALL FIVE draws, p = 0.0000 on every
-#                    one (53/2, 56/1, 58/2, 62/0, 56/0). ON beats the best
-#                    draw by +0.2944.
+#                    one (124/1, 130/0, 129/1, 124/1, 133/0). ON beats the
+#                    best draw by +0.5493.
 #
 # PHASE 15 MADE THIS STAGE STRONGER, NOT REDUNDANT, and the numbers above are
 # the second measurement rather than the first. At Phase 14 this was +0.0617
 # (15/0) and the ON-vs-placebo comparison could not clear 0.05 against the
 # luckiest draw. With clarification in front of it the same code measures
-# +0.1151 (28/1) and beats every placebo draw at p = 0.0000.
+# +0.1518 (37/0) and beats every placebo draw at p = 0.0000.
 #
 # The reason is the whole thesis of this file. PoolTermScorer ranks on the
 # shopper's free text, and before Phase 15 the shopper barely produced any:
@@ -146,11 +146,11 @@ from starter.text import terms
 # the turns where the target sits inside the window:
 #
 #            in window   mean rank    up   down   into top 10   pushed out
-#   ON             234   14.1-> 8.6  112      5            50            2
-#   PLACEBO      327-366   ~14->~19  26-34 234-263        16-18        65-89
+#   ON             324   38.7->25.0  167      5            68            5
+#   PLACEBO      660-693   ~36->~58  62-70 581-616        16-26       208-231
 #
-# Real terms move the target up 112 times and down 5. Every placebo draw
-# moves it DOWN on 234-263 turns and pushes it out of the top 10 on 65 to 89.
+# Real terms move the target up 167 times and down 5. Every placebo draw
+# moves it DOWN on 581-616 turns and pushes it out of the top 10 on 208-231.
 # The scores are one sample of a noisy statistic; this is what the mechanism
 # does on every turn, and the two arms are not the same phenomenon. An
 # earlier version of this stage scored +0.024 while moving the target DOWN on
@@ -164,9 +164,9 @@ from starter.text import terms
 #   top_n     TS        vs OFF     McNemar vs OFF
 #      10   0.628310   +0.020480   0/0    p = 1.0000  <- control, exactly null
 #      20   0.664974   +0.057144  12/2    p = 0.0129
-#      50   0.722979   +0.115149  28/1    p = 0.0000  <- committed
+#      50   0.722979   +0.115149  28/1    p = 0.0000
 #     100   0.737171   +0.129341  32/1    p = 0.0000
-#     200   0.759659   +0.151829  37/0    p = 0.0000
+#     200   0.759659   +0.151829  37/0    p = 0.0000  <- committed
 #
 # Established at 20, 50, 100 and 200; null at the control. Five comparisons,
 # so at a Bonferroni alpha/5 = 0.01 the top three still clear (20 does not). What carries it
@@ -177,45 +177,69 @@ USE_SEMANTIC_RERANK = True
 
 # CP 14.1. The reranker sees the top N of the ranked list and nothing else.
 #
-# 50, which is NOT the best-scoring row above -- and the gap has grown twice
-# now. The sweep no longer decays at 200 at all: 100 measures +0.032 TS
-# better than 50 and 200 another +0.023 on top. Taking either would mean
-# selecting a maximum on the same 200 sessions the score is then reported on,
-# AFTER seeing the sweep -- a worse version of the same trade each time the
-# gap widens, not a better one. The widening is itself a reason for caution:
-# a value that looks more and more attractive every time the pipeline changes
-# is a value being fitted to this pipeline. 50 was chosen a priori, before any sweep ran, from Phase 13's
-# measured rank distribution -- 176 of the 367 eligible-turn pool hits sit at
-# final rank 11-50, the largest single band a reordering layer can reach --
-# and it lands inside the established plateau with almost nothing lost (28
-# gained, 1 lost). An a-priori value inside a broad established plateau
-# generalizes better than a peak picked off the plateau's own chart.
+# 200, decided at the Phase 16 config freeze by
+# `python3 -m tools.phase16_depth`, which is the tool built to answer it.
 #
-# C's Phase 15 review recommends 200 and did the arithmetic properly: vs the
-# shipped 50 it is +0.036680 TS at 10 gained / 0 lost, p = 0.002, with a
-# bootstrap CI that does not cross zero, no scenario regressing, and a
-# verified mechanism -- 8 of the 25 ranking failures are targets truncated by
-# the top-50 cut, and 8 of those 8 recover at 200. C also asked for the one
-# check they had not run, since a silent CP 14.4 fallback would turn the gain
-# into an artifact. Run at depth 200 over the public set:
+# THIS VALUE WAS 50 FOR FIVE PHASES and the refusal to move it was correct
+# each time. 50 was chosen a priori, before any sweep existed, from Phase
+# 13's measured rank distribution; every sweep since showed something deeper
+# scoring better, and every time it was left alone because reading a maximum
+# off the same 200 sessions the score is then reported on is how a benchmark
+# gets fitted. That refusal is only defensible while the alternative is
+# UNEXAMINED. Phase 16 examined it.
 #
-#   scorer.order elapsed_ms   mean 0.386   P90 0.490   max 1.638
-#   budget overruns (timeouts)   0    (RERANK_BUDGET_MS = 150)
+#   depth    TS        vs 50      hits          score (permutation)
+#      50  0.722979         --    --            --
+#     100  0.737171  +0.014192    6/2  p=0.2891  p=0.2422  no verdict
+#     200  0.759659  +0.036680   10/0  p=0.0020  p=0.0035  established
+#                                       95% CI [+0.0138, +0.0623]
 #
-# Two orders of magnitude inside the budget, so the gain is not fallback
-# noise. NOT TAKEN IN THIS COMMIT, and the reason is sequencing rather than
-# doubt: the B Phase 15 review is holding on evidence and explicitly asks for
-# no production tuning, and moving this constant would move every number that
-# review is verifying. It is the next change after Phase 15 closes.
+# 100 IS NOT AN INTERMEDIATE STEP. It is not established on either test, so
+# "move halfway" would have been movement without evidence. The choice was
+# 200 or 50.
 #
-# The +0.014 at 100 is left on the table deliberately and recorded here so the
-# choice is auditable rather than quietly optimal. Whoever revisits it should
-# revisit it with a held-out split, not with this table.
+# WHAT MAKES 200 A CHOICE RATHER THAN A PEAK. Four things, and the score is
+# the weakest of them:
 #
-# Not 300. The window must stay a strict subset of the pool for CP 14.1 to
-# mean anything: a stage that reorders everything is not a reranker with a
-# fallback, it is the ranker.
-RERANK_TOP_N = 50
+#   MECHANISM    depth buys REACH, and reach is structural. A target at pool
+#                position 87 cannot be reranked by a top-50 window on any
+#                dataset -- the stage never sees it. Of the 25 ranking
+#                failures at 50, 15 have their target beyond position 50 but
+#                within 200, and 6 of those 15 recover. Those 6 are
+#                recoveries a shallower window could not have produced
+#                whatever it did with the candidates it had.
+#   DOMINANCE    0 new ranking failures appear at 200. The failure set is a
+#                strict subset of the one at 50, so on this set it is not a
+#                trade at all.
+#   NO REGRESSION  every scenario improves or holds: buying +0.0125,
+#                browsing +0.0750, override +0.1000, boundary flat. The full
+#                615-test suite passes at 200, including every CP 14.1-14.5
+#                adversarial contract.
+#   COST         0 timeouts and 0 fallbacks at any depth. scorer.order is
+#                mean 0.396 ms, P90 0.518, max 1.360, against a 150 ms
+#                budget. A deeper window that overran would silently return
+#                ranking's order and the "gain" would be an artifact; it
+#                does not.
+#
+# WHAT IS HONESTLY WEAKER THAN THE REVIEW EXPECTED. C's review reported that
+# 8 of the ranking failures are top-50 truncations and 8 of 8 recover at 200.
+# That does not reproduce. Measured here: 15 are truncations and 6 recover,
+# and 4 of the 10 total recoveries come from sessions the top-50 window could
+# already reach -- reshuffling, not reach. So depth is doing real work and it
+# is not the whole story, and the first version of this comment should not
+# claim otherwise. (The first version of the tool ALSO got this wrong in the
+# other direction, comparing failure sets by session_id across runs, which
+# the evaluator regenerates per run; it reported "all 25 recover, 21 new
+# appear". Keyed on sample_id it is 10 and 0.)
+#
+# 200 IS ALSO THE DEEPEST LEGITIMATE VALUE, which is why "it topped the
+# sweep" understates the case. The window must stay a strict subset of the
+# 300-candidate pool for CP 14.1 to mean anything -- a stage that reorders
+# everything is not a reranker with a fallback, it is the ranker. So 200 is
+# not the maximum of an open-ended search; it is the last rung below a
+# ceiling that a contract sets, and the rung below it is unestablished.
+#
+RERANK_TOP_N = 200
 
 # CP 14.4. Wall-clock budget for one scorer call, milliseconds. Generous by
 # three orders of magnitude for the shipped scorer, because its job is to

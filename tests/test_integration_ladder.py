@@ -17,7 +17,9 @@ import unittest
 from pathlib import Path
 
 from tools import config_guard
-from tools.phase16_integration import CORE, LADDER, _wrap
+from tools.phase16_integration import (CORE, LADDER,
+                                       disagreements, _wrap,
+                                       passes_gate)
 
 
 class LadderCoversTheRoadmapTest(unittest.TestCase):
@@ -76,46 +78,152 @@ class CoreIsTheMinimumWinningPathTest(unittest.TestCase):
         self.assertEqual(set(CORE), set(config_guard.COMMITTED_FLAGS))
 
 
-class TheLadderCanDisagreeTest(unittest.TestCase):
-    """The checks that let this tool fail, pinned so they cannot be softened
-    into decoration."""
+class TheGateCanFailTest(unittest.TestCase):
+    """The gate's SEMANTICS, executed -- not its source text, grepped.
 
-    def _source(self) -> str:
-        return Path("tools/phase16_integration.py").read_text(encoding="utf-8")
+    The previous version of this class asserted that certain strings appeared
+    in the tool's source. D's Phase 16 review put 29 semantic mutants through
+    it and all 29 passed, including one that turned the ladder into a rubber
+    stamp: a mutation can leave every quoted phrase in place and invert what
+    the code does. A test that reads source text tests the comment.
 
-    def test_it_compares_its_end_state_against_the_committed_flags(self) -> None:
-        source = self._source()
-        self.assertIn("COMMITTED_FLAGS", source)
-        self.assertIn("DISAGREES", source)
+    So the gate and the reconciliation are pure functions now, and these call
+    them.
+    """
 
-    def test_a_disagreement_raises_rather_than_prints(self) -> None:
-        source = self._source()
-        self.assertIn("the gated ladder does not reproduce the committed",
-                      source)
-        self.assertIn("raise SystemExit", source)
+    def test_a_gain_established_only_on_hits_passes(self) -> None:
+        # McNemar clears, permutation does not. Real case: a rung that
+        # converts misses without moving ranks much.
+        self.assertTrue(passes_gate({"p": 0.01, "net": 5},
+                                    {"p": 0.90, "mean": 0.001}))
 
-    def test_it_asserts_the_committed_score_at_the_end(self) -> None:
-        source = self._source()
-        self.assertIn("COMMITTED_TECHNICAL_SCORE", source)
-        self.assertIn("does not reproduce the committed score", source)
+    def test_a_gain_established_only_on_score_passes(self) -> None:
+        # The case McNemar is blind to: every hit moves up three ranks and
+        # not one session changes verdict. Reverting this rung would be the
+        # mispricing D named across two phases.
+        self.assertTrue(passes_gate({"p": 0.90, "net": 0},
+                                    {"p": 0.01, "mean": 0.02}))
 
-    def test_a_failed_rung_is_reverted_not_merely_reported(self) -> None:
-        source = self._source()
-        self.assertIn("GATE: FAIL", source)
-        self.assertIn("config_guard.set_flag(flag[0], flag[1], False)", source)
+    def test_a_gain_established_on_neither_fails(self) -> None:
+        self.assertFalse(passes_gate({"p": 0.90, "net": 5},
+                                     {"p": 0.90, "mean": 0.02}))
 
-    def test_the_gate_reads_both_tests(self) -> None:
-        # Quoting only McNemar is the failure D named twice; the gate must
-        # pass on either test establishing a gain.
-        source = self._source()
-        self.assertIn("paired_permutation", source)
-        self.assertIn('hits["p"] < 0.05', source)
-        self.assertIn('score["p"] < 0.05', source)
+    def test_an_ESTABLISHED_LOSS_fails(self) -> None:
+        # The mutation that would be invisible in the tool's output: drop the
+        # direction check and `p < alpha` alone keeps a feature that
+        # significantly made things worse. Every rung would still print a
+        # verdict and the ladder would still end somewhere.
+        self.assertFalse(passes_gate({"p": 0.001, "net": -9},
+                                     {"p": 0.001, "mean": -0.05}))
 
-    def test_flags_are_restored_even_if_a_rung_raises(self) -> None:
-        source = self._source()
-        self.assertIn("finally:", source)
-        self.assertIn("config_guard.restore_committed_flags()", source)
+    def test_an_identical_rung_fails(self) -> None:
+        # What rung 5 (EC/MR on core) actually produces.
+        self.assertFalse(passes_gate({"p": 1.0, "net": 0},
+                                     {"p": 1.0, "mean": 0.0}))
+
+    def test_the_gate_is_not_a_rubber_stamp(self) -> None:
+        # The named mutant. If `passes_gate` were replaced by `True`, every
+        # assertion above that expects False would fail -- this one states
+        # the property directly so the intent survives a refactor.
+        outcomes = {
+            passes_gate({"p": p, "net": n}, {"p": p, "mean": m})
+            for p, n, m in ((0.001, 5, 0.02), (0.001, -5, -0.02),
+                            (0.9, 5, 0.02), (1.0, 0, 0.0))
+        }
+        self.assertEqual(outcomes, {True, False},
+                         "the gate returns a constant; it decides nothing")
+
+    def test_alpha_is_honoured(self) -> None:
+        self.assertFalse(passes_gate({"p": 0.06, "net": 5},
+                                     {"p": 0.06, "mean": 0.02}))
+        self.assertTrue(passes_gate({"p": 0.06, "net": 5},
+                                    {"p": 0.06, "mean": 0.02}, alpha=0.10))
+
+
+class ReconciliationCanDisagreeTest(unittest.TestCase):
+    """The check the whole tool exists to be able to fail, executed."""
+
+    _COMMITTED = {("m", "A"): True, ("m", "B"): False}
+
+    def test_matching_state_reports_nothing(self) -> None:
+        self.assertEqual(
+            disagreements({("m", "A"): True, ("m", "B"): False},
+                          self._COMMITTED),
+            [])
+
+    def test_a_flag_the_ladder_kept_but_we_ship_off_is_reported(self) -> None:
+        self.assertEqual(
+            disagreements({("m", "A"): True, ("m", "B"): True},
+                          self._COMMITTED),
+            [(("m", "B"), True, False)])
+
+    def test_a_flag_the_ladder_reverted_but_we_ship_on_is_reported(self) -> None:
+        self.assertEqual(
+            disagreements({("m", "A"): False, ("m", "B"): False},
+                          self._COMMITTED),
+            [(("m", "A"), False, True)])
+
+    def test_a_flag_missing_from_the_state_defaults_to_agreement(self) -> None:
+        # A flag no rung touched cannot be a disagreement -- it was never
+        # gated, which CORE-completeness above is what actually catches.
+        self.assertEqual(disagreements({}, self._COMMITTED), [])
+
+    def test_the_real_committed_flags_are_reconcilable(self) -> None:
+        # Sanity: the function accepts the shape config_guard actually holds.
+        self.assertEqual(
+            disagreements(dict(config_guard.COMMITTED_FLAGS),
+                          config_guard.COMMITTED_FLAGS),
+            [])
+
+
+class RestoreCoversEveryMutationTest(unittest.TestCase):
+    """Rung 1 and the setup loop must be inside the try, not before it.
+
+    This one is structural rather than behavioural, because the property is
+    about control flow: it walks the AST instead of grepping, so it cannot be
+    satisfied by a comment that mentions `finally`.
+    """
+
+    def test_no_flag_is_set_before_the_try_block(self) -> None:
+        import ast
+
+        source = Path("tools/phase16_integration.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        main = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        seen_try = False
+        for node in main.body:
+            if isinstance(node, ast.Try):
+                seen_try = True
+                continue
+            if seen_try:
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "set_flag"):
+                    self.fail("a flag is mutated before main()'s try block, "
+                              "so the restore in `finally` cannot cover it")
+
+    def test_the_try_has_a_finally_that_restores(self) -> None:
+        import ast
+
+        source = Path("tools/phase16_integration.py").read_text(
+            encoding="utf-8")
+        main = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        tries = [node for node in main.body if isinstance(node, ast.Try)]
+        self.assertTrue(tries, "main() has no try block")
+        restores = [
+            inner for node in tries for statement in node.finalbody
+            for inner in ast.walk(statement)
+            if isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "restore_committed_flags"
+        ]
+        self.assertTrue(restores,
+                        "the try block's finally does not restore the flags")
 
 
 class WrapTest(unittest.TestCase):

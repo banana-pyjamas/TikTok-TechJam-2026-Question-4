@@ -1,5 +1,14 @@
 """Phase 16 -- staged final integration. Turn the features on one at a time.
 
+NAMING. Step 8 is the "Free-Text Reranker", not a semantic one. The shipped
+scorer is `reranker.PoolTermScorer`, which ranks on in-pool IDF over the
+shopper's own free text. `load_encoder_scorer()` returns None on every turn
+of every run in this repository: no encoder is vendored, none is downloaded,
+and no model contributes to the score. The internal flag is still called
+`USE_SEMANTIC_RERANK` -- renaming a pinned flag at a config freeze is a risk
+with no benefit -- but nothing a human reads should imply a trained encoder
+or an LLM is doing the ranking (B Phase 16 review, blocker 2).
+
 The roadmap's last phase, and the one most likely to be performed rather than
 run: "enable -> test -> review -> PASS -> next" for nine features is a
 satisfying ritual whether or not any of it decides anything. So this tool is
@@ -95,12 +104,56 @@ LADDER = [
     (7, "+ Dense", None,
      "NOT IMPLEMENTED, on measurement. The strongest vector retriever that "
      "can ship here is lexical TF-IDF cosine, and tools/phase13_dense_gate.py "
-     "measured the union WORSE than the committed route set: -11 sessions at "
-     "recall@50 (p = 0.0074) and -11 at @100 (p = 0.0034). What a TRAINED "
+     "measures the union WORSE than the committed route set at recall@50 -- "
+     "established negative, and re-established on every re-run. The exact "
+     "counts are deliberately NOT quoted here: they are replayed over the "
+     "live dialogue and move whenever the dialogue does, and an earlier "
+     "version of this line quoted figures the gate itself contradicted at "
+     "@100 by the time anyone read them (D Phase 16 review). Run the gate "
+     "for the numbers; this rung carries the conclusion only. What a TRAINED "
      "encoder would be worth is not measured anywhere and is not claimed."),
-    (8, "+ Semantic Reranker", ("reranker", "USE_SEMANTIC_RERANK"), ""),
+    (8, "+ Free-Text Reranker", ("reranker", "USE_SEMANTIC_RERANK"), ""),
     (9, "+ Clarification", ("clarify", "USE_CLARIFICATION"), ""),
 ]
+
+
+def passes_gate(hits: dict, score: dict, alpha: float = 0.05) -> bool:
+    """Does this rung earn its place on top of the rung below it?
+
+    PASSES if either test establishes a GAIN. Both directions of that matter:
+
+      * either test -- McNemar sees the hit set and is blind to a change that
+        moves every hit three ranks up; the paired permutation over
+        per-session composites sees the score. Quoting only the first is the
+        failure D named across two phases, and a gate that read only McNemar
+        would have reverted rungs that improved the score without converting
+        a miss.
+      * a GAIN -- an established LOSS must fail, not pass. ``p < alpha``
+        alone would keep a feature that significantly made things worse,
+        which is the one mutation of this function that would be invisible in
+        the tool's output: every rung would still print a verdict, and the
+        ladder would still end somewhere.
+
+    Pure and separately tested (tests/test_integration_ladder.py) precisely
+    because the alternative is asserting on the tool's source text, which
+    passes for any mutant that leaves the wording alone.
+    """
+    return ((hits["p"] < alpha and hits["net"] > 0)
+            or (score["p"] < alpha and score["mean"] > 0))
+
+
+def disagreements(state: dict, committed: dict) -> list[tuple]:
+    """Flags where the gated ladder and the shipped configuration differ.
+
+    Returns ``(flag, reached, committed)`` triples. Empty means every flag's
+    position is a measured consequence; non-empty is the finding this whole
+    tool exists to be able to produce, and ``main`` raises on it.
+    """
+    return [
+        (flag, state.get(flag, value), value)
+        for flag, value in sorted(committed.items())
+        if state.get(flag, value) != value
+    ]
 
 
 def main() -> None:
@@ -130,17 +183,24 @@ def main() -> None:
         return result
 
     state = dict(CORE)
-    for (module, name), value in state.items():
-        config_guard.set_flag(module, name, value)
-
     print("=" * 74)
     print("THE LADDER -- each rung enabled on top of everything KEPT so far")
     print("=" * 74)
-    previous = run("1. Core only")
-    core = previous
-    rows = [(1, "Core only", previous, None, "baseline")]
 
+    # EVERYTHING that mutates a flag is inside this try, including the setup
+    # loop and rung 1. The first version opened the try AFTER rung 1, so a
+    # raise while setting the core flags or while measuring core left the
+    # process pinned to the core configuration -- and the tool's own crash
+    # guard, which exists to restore them, could not run (D Phase 16 review).
+    # A restore that only covers the rungs it happened to be wrapped around
+    # is not a restore.
     try:
+        for (module, name), value in state.items():
+            config_guard.set_flag(module, name, value)
+        previous = run("1. Core only")
+        core = previous
+        rows = [(1, "Core only", previous, None, "baseline")]
+
         for step, label, flag, note in LADDER[1:]:
             print()
             if flag is None:
@@ -159,8 +219,7 @@ def main() -> None:
             print("      " + format_composite("vs previous rung (score)",
                                               composites_by_sample(previous),
                                               composites_by_sample(result)))
-            passed = ((hits["p"] < 0.05 and hits["net"] > 0)
-                      or (score["p"] < 0.05 and score["mean"] > 0))
+            passed = passes_gate(hits, score)
             if passed:
                 print(f"      GATE: PASS -- kept ON")
                 state[flag] = True
@@ -179,21 +238,20 @@ def main() -> None:
     print("\n" + "=" * 74)
     print("DOES THE GATED LADDER LAND ON WHAT SHIPS?")
     print("=" * 74)
-    disagreements = []
+    disagreed = disagreements(state, config_guard.COMMITTED_FLAGS)
+    disagreeing = {flag for flag, _, _ in disagreed}
     for flag, committed in sorted(config_guard.COMMITTED_FLAGS.items()):
         reached = state.get(flag, committed)
-        mark = "same" if reached == committed else "DISAGREES"
-        if reached != committed:
-            disagreements.append((flag, reached, committed))
+        mark = "DISAGREES" if flag in disagreeing else "same"
         name = f"{flag[0]}.{flag[1]}"
         print(f"   {name:34} ladder {str(reached):5}   "
               f"committed {str(committed):5}   {mark}")
-    if disagreements:
+    if disagreed:
         raise SystemExit(
             "the gated ladder does not reproduce the committed "
             "configuration: "
             + "; ".join(f"{m}.{n} ladder={r} committed={c}"
-                        for (m, n), r, c in disagreements)
+                        for (m, n), r, c in disagreed)
             + ". Either a shipped flag is not supported by its own gate, or "
             "the gate is wrong. Both are findings; neither is ignorable.")
     print("\n   Every flag's position is what its own rung measured. No flag")

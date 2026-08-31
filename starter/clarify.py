@@ -45,7 +45,7 @@ with both in view rather than by reading the larger number.
 
 WHAT IT ACTUALLY ASKS
 
-Over the 200 live sessions (918 questions on 932 turns, 14 turns silent):
+Over the 200 live sessions (848 questions on 858 turns, 10 turns silent):
 
     feature   282  30.7%     use_case   57   6.2%     budget   37   4.0%
     brand     200  21.8%     style      50   5.4%     size     19   2.1%
@@ -53,7 +53,7 @@ Over the 200 live sessions (918 questions on 932 turns, 14 turns silent):
     material  115  12.5%
 
 ``category`` is never asked because the opening message always fills it. The
-open question is 4.6% of all questions and reaches 42 of 200 sessions, which
+open question is 3.7% of all questions and reaches 31 of 200 sessions, which
 is the number the B Phase 15 review asked to see come down; see
 MAX_OPEN_QUESTIONS for how.
 
@@ -100,12 +100,12 @@ from starter.state import is_non_answer
 # ON, and it is not close -- `python3 -m tools.phase15_clarification`
 # reproduces all of this:
 #
-#   OFF   HR 0.2850  MRR 0.162099  MTTC 8.360  TS 0.243930
-#   ON    HR 0.8500  MRR 0.580597  MTTC 4.810  TS 0.722979   +0.479049
+#   OFF   HR 0.2850  MRR 0.162099  MTTC 8.360  TS 0.267069
+#   ON    HR 0.9000  MRR 0.591530  MTTC 4.390  TS 0.759659   +0.492590
 #
-#   ON vs OFF (hits)    +113   114/1 discordant       p = 0.0000  established
-#   ON vs OFF (score)   +0.479049  95% CI [+0.4183, +0.5383]
-#                       125/200 sessions moved        p = 0.0001  established
+#   ON vs OFF (hits)    +117   118/1 discordant       p = 0.0000  established
+#   ON vs OFF (score)   +0.492590  95% CI [+0.4330, +0.5497]
+#                       133/200 sessions moved        p = 0.0001  established
 #
 # BOTH tests, because they answer different questions and this project has
 # now mispriced a verdict twice by quoting only the first (D Phase 15 review).
@@ -113,9 +113,8 @@ from starter.state import is_non_answer
 # composites sees the score, including rank and turn movement McNemar is
 # blind to. They agree here. Where they disagree, say so.
 #
-# Every scenario, by a lot: buying +0.4500, browsing +0.6750, override
-# +0.5000, boundary +0.8000. This one flag is worth 3.5x the whole of Phases
-# 0-14 combined (+0.1372 over the baseline), which is not a compliment to
+# Every scenario, by a lot. This one flag is worth 3.7x the whole of Phases
+# 0-14 combined (+0.1325 over the baseline), which is not a compliment to
 # this phase so much as a statement about what the previous fourteen were
 # optimising. They made the agent better at answering a question it was never
 # told the answer to.
@@ -129,28 +128,35 @@ from starter.state import is_non_answer
 #
 # WHICH QUESTION, WHICH IS THE PART THIS BENCHMARK CANNOT SETTLE
 #
-#   shipped (C, one open question)  TS 0.722979
-#   unbounded open question (A)     TS 0.722979   vs shipped: IDENTICAL
-#   no open question at all (B)     TS 0.686029   vs shipped: -0.0370, 9/0,
-#                                                 p = 0.0039  established
-#   wildcard every turn (D)         TS 0.719419
-#   first empty slot                TS 0.704984
-#   harness-fitted                  TS 0.726837   vs shipped: -2 hits, 0/2,
-#                                                 p = 0.5000; score +0.003858,
-#                                                 CI [-0.0088, +0.0132],
-#                                                 p = 0.5031. No verdict.
+#   shipped (C, one open question)  TS 0.759659
+#   unbounded open question (A)     TS 0.759659   vs shipped: IDENTICAL
+#   no open question at all (B)     TS 0.728109   vs shipped: -0.0316, 8/0,
+#                                                 p = 0.0078  established
+#   wildcard every turn (D)         TS 0.784651
+#   first empty slot                TS 0.741203
+#   harness-fitted                  TS 0.765142   vs shipped: -1 hit, 0/1,
+#                                                 p = 1.0000; score +0.005483,
+#                                                 CI [-0.0045, +0.0131],
+#                                                 p = 0.2610. No verdict.
 #
 # Read the A row first: capping the open question at one per session costs
 # nothing measurable. It is not, however, a no-op -- A asks the wildcard 66
-# times across those 42 sessions and C asks it 42 times, so the cap really
-# does remove 24 repeat questions; they simply changed no session's outcome.
+# times across those 31 sessions and C asks it 31 times, so the cap really
+# does remove 19 repeat questions; they simply changed no session's outcome.
 # See MAX_OPEN_QUESTIONS. Then read B: removing the open question entirely
-# costs an established 0.0370. So it is no longer load-bearing and it is not
+# costs an established 0.0316. So it is no longer load-bearing and it is not
 # free either, and both facts are stated rather than one of them.
 #
-# The shipped policy is ahead of the wildcard-every-turn arm and the naive
-# first-empty-slot arm, and neither margin is established -- stated plainly,
-# this benchmark does not show that the clever question beats the dumb one.
+# THE WILDCARD ARM NOW SCORES HIGHER THAN THE SHIPPED ONE (0.784651 vs
+# 0.759659), and that is stated first because it is the uncomfortable
+# direction. It was behind at depth 50 and is ahead at 200. Nothing about
+# question quality changed; what changed is that a deeper window converts the
+# extra constraints a wildcard harvests. This is exactly the structural
+# advantage the module docstring describes -- "other" matches a superset of
+# every specific attribute, so the harness rewards it -- and the response is
+# the same as when it was losing: the policy is not chosen by this column.
+# Anyone who wants the +0.025 can set MAX_OPEN_QUESTIONS high and take a
+# policy whose own reviewer called it farming.
 #
 # It cannot show it, either, and that is the load-bearing sentence: `"other"`
 # matches a strict superset of what any specific question matches (see the
@@ -168,12 +174,12 @@ from starter.state import is_non_answer
 # returns "category", so those two questions can never be answered on this
 # harness: the scorer asks brand on 200 turns, every one is declined, and
 # CP 15.7 closes it having cost one turn per session. Deleting them from
-# ``SCORABLE_ATTRIBUTES`` is worth +0.003858 TS on a 95% CI of
-# [-0.0088, +0.0132] that STRADDLES ZERO, and it LOSES two sessions on hits
-# (0/2 discordant, p = 0.5000) -- no verdict on either test, from a
+# ``SCORABLE_ATTRIBUTES`` is worth +0.005483 TS on a 95% CI of
+# [-0.0045, +0.0131] that STRADDLES ZERO, and it LOSES a session on hits
+# (0/1 discordant, p = 1.0000) -- no verdict on either test, from a
 # comparison the tool only started making against the shipped arm after the
 # D Phase 15 review pointed out it had only ever been made against OFF. The
-# figures here read +0.0144 and 2/1 until then, which were against the wrong
+# figures here read +0.0144 and 2/1 at one point, which were against the wrong
 # baseline. It remains a policy fitted to the branch list of a simulator's
 # classifier. Brand is the single most
 # discriminating thing this catalog knows and asking a real shopper about it
@@ -260,11 +266,11 @@ PRICE_BUCKETS = 4
 # not to pick the peak.
 #
 #   floor    TS         vs OFF
-#   0.00   0.701142   +0.457212   <- ask a value-scored question on any signal
-#   0.05   0.717937   +0.474007
-#   0.10   0.722979   +0.479049   <- committed, chosen a priori
-#   0.20   0.704196   +0.460266
-#   0.40   0.677156   +0.433226
+#   0.00   0.726268   +0.459199   <- ask a value-scored question on any signal
+#   0.05   0.748790   +0.481721
+#   0.10   0.759659   +0.492590   <- committed, chosen a priori
+#   0.20   0.752856   +0.485787
+#   0.40   0.731250   +0.464181
 #
 # Not a cliff, and the a-priori value happens to top the table. That is luck
 # and is recorded as luck: 0.05 is 0.005 away, which is half a session, and
@@ -294,10 +300,10 @@ ASK_VALUE_FLOOR = 0.10
 # tools/phase15_clarification.py:
 #
 #   policy                    TS      other/session   sessions using other
-#   A  unbounded           0.722979       0.33             42/200
-#   B  no open question    0.686029       0.00              0/200
-#   C  at most one  <-     0.722979       0.21             42/200
-#   D  wildcard every turn 0.719419       3.72            200/200
+#   A  unbounded           0.759659       0.25             31/200
+#   B  no open question    0.728109       0.00              0/200
+#   C  at most one  <-     0.759659       0.15             31/200
+#   D  wildcard every turn 0.784651       3.17            200/200
 #
 # THE CAP IS SCORE-FREE, NOT BEHAVIOUR-FREE, and the first version of this
 # comment got that wrong. It said "no session ever wanted a second open
@@ -305,23 +311,22 @@ ASK_VALUE_FLOOR = 0.10
 # 0.33 per session over 42 sessions is 66 asks, not 42 (B Phase 15 review,
 # E1). Measured directly:
 #
-#   A  66 wildcard asks over 42 sessions; 24 of those sessions asked twice
-#      or more. 10 of the 24 go on to HIT, so the repeats are not confined
-#      to sessions that were lost anyway.
-#   C  42 asks over the same 42 sessions; exactly one each, by construction.
+#   A  50 wildcard asks over 31 sessions; 19 of those sessions asked twice
+#      or more, and the repeats are not confined to sessions lost anyway.
+#   C  31 asks over the same 31 sessions; exactly one each, by construction.
 #
 # And yet A and C score identically -- 0/0 discordant, 0 of 200 sessions
-# moved, every metric equal to six decimals. So the cap removes 24 repeat
+# moved, every metric equal to six decimals. So the cap removes 19 repeat
 # questions that changed no session's outcome. It is a real behavioural
 # change with no measurable price, which is a better thing to be able to say
 # than "nothing was happening": the thing it forbids -- re-asking a
 # productive wildcard until it dries up -- is farming a harness whose
 # ``customer_reply`` treats "other" as matching a strict superset of every
-# specific attribute, and it WAS happening on 24 sessions.
+# specific attribute, and it WAS happening on 19 sessions.
 #
 # B is the strictly-generic policy: no open question at any point. It costs
-# an ESTABLISHED 0.0370 (9/0 discordant, p = 0.0039; paired permutation over
-# per-session composites p = 0.0017). That is a real price, not noise, and it
+# an ESTABLISHED 0.0316 (8/0 discordant, p = 0.0078; paired permutation over
+# per-session composites p = 0.0034). That is a real price, not noise, and it
 # is stated as one. Anyone who wants zero wildcard dependence sets this to 0
 # and pays it knowingly.
 #

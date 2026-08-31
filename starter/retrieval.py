@@ -104,28 +104,37 @@ DEFAULT_ROUTES = ("bm25", "category")
 # four arms fused through the RRF below with route provenance intact:
 #
 #                                   @50      @100      @300   vs committed @300
-#   bm25                         0.3800    0.5300    0.7700   +1 / -9
-#   bm25 + category (committed)  0.4150    0.5650    0.8100   --
-#   tfidf                        0.2600    0.4150    0.6950   +4 / -27
-#   bm25 + category + tfidf      0.3600    0.5100    0.8050   +1 / -2
+#   bm25 + category (committed)  0.7850    0.8650    0.9800   --
+#   bm25 + category + tfidf      0.7350    0.8450    0.9700   +1 / -3
 #
 # Standalone recall was never the question -- a weaker retriever can still
 # contribute unique candidates through a union. The UNION is the question,
-# and it is worse rather than neutral: -11 sessions at @50 (2/13 discordant,
-# p = 0.0074) and -11 at @100 (1/12, p = 0.0034), no verdict at @300 (1/2).
-# The lexical route adds 114.9 unique candidates per turn and pushes cap loss
-# from 130.3 to 245.2 discarded candidates per turn; what it displaces is
-# worth more than what it adds. OFF on measurement, not on principle.
+# and it is worse rather than neutral: -10 sessions at @50 (4/14 discordant,
+# p = 0.0309, established negative), no verdict at @100 (-4, 2/6, p = 0.2891)
+# and no verdict at @300 (1/2). The lexical route adds 114.4 unique
+# candidates per turn and pushes cap loss from 125.1 to 239.5 discarded
+# candidates per turn; what it displaces is worth more than what it adds.
+# OFF on measurement, not on principle.
 #
-# The recall and McNemar rows above are pure retrieval and do not move when
-# anything downstream does. The two cap-loss figures DO -- they are counted
-# over the live dialogue, and the dialogue changes when the ranker changes.
-# They read 146 and 257 until Phase 14 moved them and nothing noticed, which
-# is the whole of D's Phase 14 Finding 3: this repo's guards check assertions
-# and are blind to prose. Phase 15 moved them again, which is what "moves
-# with the pipeline" means -- the dialogue is shorter now, so fewer turns
-# accumulate a wide pool. `python3 -m tools.phase13_dense_gate` regenerates
-# both, and moving the pipeline means re-running it.
+# NOTHING IN THIS BLOCK IS INVARIANT, and the previous version of this
+# paragraph said the opposite. It claimed "the recall and McNemar rows above
+# are pure retrieval and do not move when anything downstream does", which is
+# false and was the licence under which those rows went stale: the gate
+# REPLAYS over the captured live dialogue, and Phase 15 changed what the
+# shopper says on every turn. Measured drift across that change: @50 went
+# 2/13 -> 4/15 -> 4/14 and @100 went 1/12 -> 2/6, with @300's 1/2 unchanged
+# proving it is the same comparison rather than a different one (D Phase 16
+# review). The @100 row had INVERTED its verdict -- established negative to
+# no verdict -- while the comment still asserted the old p-value.
+#
+# The retrieval facts that genuinely do not move are the ones computed from
+# the INDEX rather than from a replay, and there are none in this block. So
+# the rule for this whole comment is the simple one: re-run
+# `python3 -m tools.phase13_dense_gate` after ANY change to the pipeline or
+# to the dialogue, and edit here in the same commit. The conclusion has
+# survived every re-run -- @50 is established-negative every time -- which is
+# why the recommendation has not changed even though most of its numbers
+# have.
 #
 # 2  WHAT WAS NOT MEASURED: A TRAINED SEMANTIC ENCODER
 #
@@ -178,8 +187,8 @@ DEFAULT_ROUTES = ("bm25", "category")
 # HitRate term only, while TS = 0.5*HR + 0.3*MRR + 0.2*eff; withdrawn in
 # favour of the bracket, which has since closed almost to nothing.
 #
-# Meanwhile 25 targets reach the pool on a turn that COULD have scored and
-# still lose: 5.0x the session count of the whole retrieval surface, all of it
+# Meanwhile 15 targets reach the pool on a turn that COULD have scored and
+# still lose: 3.0x the session count of the whole retrieval surface, all of it
 # downstream of this file. (7c52e87 published 120 and 3.2x; both terms of that
 # ratio were session-level and override-blind.)
 #
@@ -194,8 +203,8 @@ DEFAULT_ROUTES = ("bm25", "category")
 # So the honest rule is narrower than the old one. Nothing DOWNSTREAM of
 # retrieval moves these; anything that changes what the shopper SAYS does.
 # The conversion facts move under both. All of them are stated against the
-# committed configuration: 170/195 in-pool conversion, 25 in-pool losses,
-# 5.0x. Re-run `python3 -m tools.phase13_dense_gate` after any change to
+# committed configuration: 180/195 in-pool conversion, 15 in-pool losses,
+# 3.0x. Re-run `python3 -m tools.phase13_dense_gate` after any change to
 # ranking OR to the dialogue; it reads the committed configuration and will
 # disagree with this comment rather than quietly agree with it.
 #

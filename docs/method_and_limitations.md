@@ -13,7 +13,8 @@ user message
   -> state manager        deterministic slot extraction + free-text evidence
   -> retrieval            BM25 + category routes over SQLite FTS5, RRF union
   -> constraint ranking   match / violation / unknown per slot, + popularity
-  -> lexical reranking    in-pool IDF over the shopper's own free text
+  -> free-text reranking  in-pool IDF over the shopper's own words (lexical;
+                          no encoder, no model -- see below)
   -> clarification        which attribute to ask about, if any
   -> response             10 recommendations AND a question, same turn
 ```
@@ -28,8 +29,8 @@ Each stage is behind an ablation flag and each was measured OFF vs ON on the
 | + multi-route retrieval | 0.119431 | +0.012721 |
 | + constraint ranking | 0.134566 | +0.015135 |
 | + popularity prior | 0.182258 | +0.047692 |
-| + lexical reranker | 0.243930 | +0.061672 |
-| **+ clarification (ships)** | **0.722979** | **+0.479049** |
+| + free-text reranker | 0.267069 | +0.084811 |
+| **+ clarification (ships)** | **0.759659** | **+0.492590** |
 
 ### Staged integration, and what it decided
 
@@ -48,13 +49,13 @@ than an omission:
 | 5 | EC/MR | **reverted** — exactly inert on core, 0/0 discordant |
 | 6 | Popularity | kept — +0.047692, 10/0, p = 0.0020 |
 | 7 | Dense | not implemented — measured worse, Phase 13 |
-| 8 | Semantic Reranker | kept — +0.061672, 15/0, p = 0.0001 |
-| 9 | Clarification | kept — +0.479049, 114/1, p = 0.0000 |
+| 8 | Free-Text Reranker | kept — +0.084811, 18/0, p = 0.0000 |
+| 9 | Clarification | kept — +0.492590, 118/1, p = 0.0000 |
 
 The ladder's end state matches the committed flags on all eight and
 reproduces `COMMITTED_TECHNICAL_SCORE` exactly, so no flag ships on history
-or intuition. Whole ladder: **+0.588413**, 139/1 discordant, p = 0.0000,
-bootstrap CI [+0.532, +0.642].
+or intuition. Whole ladder: **+0.625093**, 148/0 discordant, p = 0.0000,
+bootstrap CI [+0.574, +0.673].
 
 ## Model choice
 
@@ -71,7 +72,9 @@ A deterministic agent satisfies all three trivially. The cost is that no
 stage can generalise beyond what a rule can express, and the sections below
 say where that cost lands.
 
-A semantic reranker WAS built for a model and ships without one:
+The reranking stage is **lexical, not semantic**, and the distinction is not
+cosmetic: it ranks the window on in-pool IDF over the shopper's own free
+text. The CONTRACT was built for a model and ships without one:
 `starter/reranker.py` defines `load_encoder_scorer`, which returns `None` on
 this machine, and the whole CP 14.1–14.5 fallback contract exists so an
 encoder can be dropped in later without touching the pipeline. Phase 13
@@ -103,7 +106,8 @@ below the catalog median, where unbiased would be 100). On this benchmark a
 bestseller list is close to an oracle. The private set is built the same way,
 so the gain should transfer — but it is **not** evidence that ranking by
 review count serves shoppers, and on a counterfactual set with targets drawn
-uniformly the same prior measures −0.012556. The weight is held an order of
+uniformly the same prior measures −0.012556. On the final configuration
+the prior is no longer established at all: +0.0175 at 3/0, p = 0.2500. The weight is held an order of
 magnitude below the constraint weight (`W_POPULARITY` 0.008 vs `W_MATCH`
 0.10) for that reason, leaving a large measured gain on the table: raising
 it to 0.10 pays enormously here and would be fitting the sampling.
@@ -154,8 +158,8 @@ and fail in 1 of 30.
 
 ### What the residual actually is
 
-30 sessions still miss. Of those, **5 are retrieval failures** (the target
-never reaches the 300-candidate pool on a scoring-eligible turn) and **25 are
+20 sessions still miss. Of those, **5 are retrieval failures** (the target
+never reaches the 300-candidate pool on a scoring-eligible turn) and **15 are
 ranking failures** (it reaches the pool and never the top 10). The remaining
 headroom is a ranking problem, not a retrieval one, and the downstream delay
 confirms it: the ranker holds a target it already has for a mean of 1.65
@@ -174,7 +178,7 @@ reproduces all of this.
 - Every tunable is registered in `tools/config_guard.py` and checked before
   any measurement runs; `python3 -m tools.config_guard` verifies the whole
   configuration and fails loudly.
-- 607 unit tests, run on the certified Python 3.9.6.
+- 615 unit tests, run on the certified Python 3.9.6.
 - Every measured number in the source comments names the tool that
   regenerates it.
 

@@ -144,7 +144,7 @@ COMMITTED_CONSTANTS: dict[tuple[str, str], Any] = {
     # Phase 14. The reranker's window and its latency budget both decide what
     # gets measured: the window bounds which candidates the stage can even
     # reach, and the budget decides whether a slow scorer's answer counts.
-    ("reranker", "RERANK_TOP_N"): 50,
+    ("reranker", "RERANK_TOP_N"): 200,
     ("reranker", "RERANK_BUDGET_MS"): 150.0,
     # Phase 15. The window a question's value is judged over, the quantile
     # grid for the one continuous attribute, and the bar a specific question
@@ -242,7 +242,7 @@ CONTENT_SEQUENCES = {
 # historical reference rather than the committed one.)
 #
 # Moving the committed score means updating this line in the same change.
-COMMITTED_TECHNICAL_SCORE = 0.722979
+COMMITTED_TECHNICAL_SCORE = 0.759659
 
 
 def _module(name: str):

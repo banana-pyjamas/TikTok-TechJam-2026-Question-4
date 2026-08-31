@@ -16,8 +16,9 @@ organizer's README says "3.10 or later is recommended", and every measurement
 this team reports is produced on 3.9.6 (`/usr/bin/python3` on macOS 15). The
 full test suite and the public evaluator both pass on it.
 
-The package is also exercised on 3.12.2 during development and behaves
-identically, with one documented exception that is fixed rather than relied
+The package is also exercised on a modern CPython during development (3.12.2
+here) and behaves identically, with one documented exception that is fixed
+rather than relied
 on: CPython 3.12's `sum` uses compensated summation and 3.9's does not, so a
 float sum over an unordered set could differ between them. `starter/reranker.py`
 sorts its terms before summing so the result is the same on both. See the
@@ -91,9 +92,10 @@ have reached the arithmetic.
 ## Verifying the submission
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 607 tests
+python3 -m unittest discover -s tests -t .   # 615 tests
 python3 -m tools.config_guard                # every pinned flag and constant
 python3 -m tools.phase16_integration         # staged enable, one feature at a time
+python3 -m tools.phase16_depth               # the RERANK_TOP_N depth gate
 python3 -m tools.disclosure                  # latency, tokens, cost
 ```
 
