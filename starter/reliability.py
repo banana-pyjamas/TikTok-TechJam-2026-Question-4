@@ -1,11 +1,11 @@
-"""Match Reliability (Phase 11, CP 11.2).
+"""Match Reliability.
 
 How much a catalog verdict about one SLOT is worth. Not how much the shopper
 meant the constraint -- that is Evidence Confidence, and it lives on the slot
-entry in ``SessionState`` (CP 11.1). The two are independent, which is the
-whole point of the phase: strong intent against weak catalog evidence
-(CP 11.4) and weak intent against strong catalog evidence (CP 11.5) are
-different situations and must not be collapsed into one number.
+entry in ``SessionState``. The two are independent, and that is the point:
+strong intent against weak catalog evidence, and weak intent against strong
+catalog evidence, are different situations and must not be collapsed into one
+number.
 
 WHERE THE NUMBER COMES FROM
 
@@ -21,7 +21,7 @@ curates. A field present for one product in ten is incidental text that
 happened to match a pattern, and a mismatch on it means correspondingly
 little. That is not a new argument: it is the reason ``ranking.VIOLATION_SLOTS``
 already excludes ``size`` by hand, with the comment "size metadata is sparse
-and inconsistent". Phase 11 keeps that judgement and makes it continuous and
+and inconsistent". This keeps that judgement and makes it continuous and
 derived rather than binary and hardcoded.
 
 Deliberately label-free. Reliability could instead be fitted to the 200 public
@@ -32,7 +32,7 @@ private 800. The label-based version is computed by
 ``tools/phase11_confidence.py`` as a CHECK on this one, never as its source.
 
 Absent statistics, every slot is fully reliable, so a caller that never
-computes coverage gets exactly the pre-Phase-11 behaviour.
+computes coverage gets unweighted behaviour exactly.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ _NUMERIC_SLOTS = {"budget": "price"}
 
 # A slot we have no statistic for is trusted. An unknown slot must not be
 # silently discounted: that would be a hard filter arriving through the back
-# door, which is exactly what CP 11.5 forbids.
+# door.
 DEFAULT_RELIABILITY = 1.0
 
 # Floor under the derived value. A slot is never worth ZERO -- a zero would

@@ -1,3 +1,12 @@
+"""The agent entrypoint: one deterministic turn, end to end.
+
+    user message -> state -> Context -> retrieval UNION -> constraint ranking
+                 -> free-text reranking -> clarification -> payload
+
+Only the state manager writes ``SessionState``; retrieval, ranking, reranking
+and clarification all read it. No network, no model, no LLM.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -14,11 +23,10 @@ from starter.contracts import Candidate, Context, RankingResult, SessionState
 from starter.ranking import POPULARITY_KEY, RELIABILITY_KEY
 from starter.ranking import rank as constraint_rank
 from starter.reliability import match_reliability, slot_coverage
-# The MODULE, not its names. `config_guard.set_flag` assigns to the defining
-# module, so `from starter.reranker import USE_SEMANTIC_RERANK` would bind a
-# COPY here that the ablation could never flip -- the flag would read ON in
-# the guard's report and OFF in the code it governs. Phase 12 closed that
-# exact hole once already; it is not being reopened one module over.
+# The MODULE, not its names. ``config_guard.set_flag`` assigns to the defining
+# module, so ``from starter.reranker import USE_SEMANTIC_RERANK`` would bind a
+# COPY here that an ablation could never flip -- the flag would read ON in the
+# guard's report and OFF in the code it governs.
 from starter import clarify, reranker
 from starter.retrieval import (_BM25_RANK, DEFAULT_ROUTES, POOL_LIMIT,
                                bm25_route, fuse, retrieve)
@@ -27,54 +35,36 @@ from starter.text import flatten_text as _text
 from starter.text import terms as _terms
 
 
-# `_BM25_RANK` is IMPORTED from retrieval above, not restated here.
-#
-# It was a second copy of the same seven field weights until the D Phase 15
-# review pointed at it. Two identical literals in two modules is the drift
-# shape this repo keeps finding (D-N2, D-P1): nothing would have failed if one
-# of them had been retuned, the Phase 1 baseline path and the retrieval route
-# would silently have been scoring different documents, and every ablation
-# comparing them would have been comparing two things. The constant exists so
-# the SELECT projection and the ORDER BY cannot drift apart (CP 1.3); that
-# argument applies across modules for exactly the same reason.
+# ``_BM25_RANK`` is imported from retrieval, not restated here. Two identical
+# literals in two modules is a drift shape: nothing would fail if one were
+# retuned, and the baseline path and the retrieval route would silently score
+# different documents.
 _RESPONSE_MESSAGE = "Here are the closest matches I found."
 
-# --------------------------------------------------------------------------
-# Ablation flags (Phase 7 controlled comparison; Phase 16 staged enablement).
-#
-# Turning one OFF restores the behaviour of the phase before it landed:
+# Ablation flags. Turning one OFF restores the behaviour from before it landed:
 #
 #   USE_STATE               run the deterministic state manager each turn
-#   USE_MULTI_ROUTE         3-route UNION pool vs the BM25-only pool
+#   USE_MULTI_ROUTE         multi-route UNION pool vs the BM25-only pool
 #   USE_CONSTRAINT_RANKING  constraint scoring vs pure retrieval order
 #
 # With all three OFF the agent reproduces the official weak-BM25 baseline,
 # which is the validity check on the whole ablation
 # (``python3 -m tools.phase7_ablation``).
 #
-# Phase 7 measured the 3-route union net-NEGATIVE (TS 0.131194 -> 0.115512)
-# and it was disabled. The Phase 9 review showed that conclusion was an
-# artifact of WHICH routes: the cost is the attribute route alone. With the
-# route set corrected to bm25 + category the union is ON.
+# USE_MULTI_ROUTE is ON because it measurably improves CANDIDATE RECALL, not
+# because its score effect is established -- end to end it is no verdict. See
+# ``retrieval.DEFAULT_ROUTES``; do not quote a score gain for this flag without
+# reading it.
 #
-# It is ON because it measurably improves CANDIDATE RECALL, not because its
-# score effect is established -- end to end with ranking ON it is +0.0034 TS
-# at McNemar p = 1.0000, which is no verdict. See retrieval.DEFAULT_ROUTES for
-# the full statement of what is and is not established here; do not quote a
-# score gain for this flag without re-reading it.
-#
-# There is deliberately no USE_ADAPTIVE_STRATEGY flag. The strategy is always
-# computed but does not gate retrieval -- mode-adaptive route selection
-# measured worth +0.000298, far below the noise floor, so a flag for it would
-# have been a knob that changes nothing.
-# --------------------------------------------------------------------------
+# There is deliberately no adaptive-strategy flag. The strategy is computed but
+# does not gate retrieval: mode-adaptive route selection measured far below the
+# noise floor, so a flag for it would be a knob that changes nothing.
 USE_STATE = True
 USE_MULTI_ROUTE = True
 USE_CONSTRAINT_RANKING = True
 
-# The evaluator scores at most this many recommendations (agent_api_contract
-# turn_request pins top_k to 10). A larger top_k must never yield a longer
-# list -- enforced at both the ranking and the response stage (CP 1.6).
+# The evaluator scores at most this many recommendations. A larger ``top_k``
+# must never yield a longer list.
 _MAX_RECOMMENDATIONS = 10
 
 
@@ -83,27 +73,13 @@ def _effective_k(top_k: int) -> int:
     return min(max(0, top_k), _MAX_RECOMMENDATIONS)
 
 
-# --------------------------------------------------------------------------
-# Minimum end-to-end turn pipeline (Phase 1).
-#
-#   user message -> Context -> BM25 -> Candidate[] -> RankingResult -> respond()
-#
-# Each stage is a small pure function so B / C / D can review and test it in
-# isolation. Retrieval and ranking are still the weak baseline: BM25 only, no
-# state-driven query rewriting. Nothing here mutates SessionState yet (Phase 2).
-# --------------------------------------------------------------------------
-
-
 def _build_context(
     session_id: str, user_message: str, turn: int, state: SessionState
 ) -> Context:
-    """CP 1.2 - wrap a turn's inputs in a minimal, safe Context.
+    """Wrap a turn's inputs in a minimal Context.
 
-    No query derivation happens yet; downstream reads ``user_message``
-    directly. ``state`` is passed by reference so later layers read live
-    session state; they must treat it as read-only. Only the deterministic
-    state manager mutates ``SessionState`` (single-writer invariant, see
-    ``starter/contracts.py``).
+    ``state`` is passed by reference so later layers read live session state;
+    they must treat it as read-only. Only the state manager mutates it.
     """
     return Context(
         session_id=session_id,
@@ -116,13 +92,10 @@ def _build_context(
 def _bm25_search(
     connection: sqlite3.Connection, text: str, limit: int
 ) -> list[tuple[str, float]]:
-    """CP 1.3 - the baseline BM25 query, behavior unchanged.
+    """The baseline BM25 query.
 
-    Same tokenization, same ``OR`` expression, same weighted ``bm25`` ORDER
-    BY, same ``LIMIT``. The only difference from the old inline query is that
-    the raw ``bm25`` value is also selected (projection only - it does not
-    affect which rows match or their order). Rows come back best-first;
-    SQLite ``bm25`` is more negative for a better match.
+    Rows come back best-first; SQLite ``bm25`` is more negative for a better
+    match, so callers negate it.
     """
     terms = list(dict.fromkeys(_terms(text)))[:40]
     expression = " OR ".join(f'"{term}"' for term in terms)
@@ -137,12 +110,10 @@ def _bm25_search(
 
 
 def _to_candidates(rows: list[tuple[str, float]]) -> list[Candidate]:
-    """CP 1.4 - BM25 rows -> Candidate[].
+    """BM25 rows -> ``Candidate[]``, preserving retrieval order.
 
-    Preserves ``parent_asin`` and retrieval order. The raw SQLite ``bm25``
-    value is negated on the way in so ``route_scores["bm25"]`` follows the
-    usual "higher is better" convention; ``route_sources`` becomes
-    ``("bm25",)``.
+    The raw SQLite score is negated so ``route_scores["bm25"]`` follows the
+    usual "higher is better" convention.
     """
     return [
         Candidate(parent_asin=parent_asin, route_scores={"bm25": -raw})
@@ -151,12 +122,10 @@ def _to_candidates(rows: list[tuple[str, float]]) -> list[Candidate]:
 
 
 def _rank(candidates: list[Candidate], top_k: int) -> RankingResult:
-    """CP 1.5 - sort candidates by BM25 score (higher = better), keep Top-k.
+    """Sort by BM25 score, keep the top k.
 
-    ``top_k`` is clamped to the frozen maximum (10); a larger value cannot
-    produce a longer list. Python's sort is stable, so candidates with an
-    equal score keep their retrieval order. ``diagnostics`` here is minimal
-    and provisional; the full ranking-diagnostics schema is CP 6.7.
+    ``top_k`` is clamped to the frozen maximum. Python's sort is stable, so
+    equal-scoring candidates keep their retrieval order.
     """
     ordered = sorted(
         candidates,
@@ -175,26 +144,21 @@ def _rank(candidates: list[Candidate], top_k: int) -> RankingResult:
 
 def _to_response(result: RankingResult, top_k: int,
                  ask: str | None = None) -> dict:
-    """CP 1.6 / CP 15.4 - RankingResult -> evaluator ``respond()`` payload.
+    """``RankingResult`` -> the evaluator's ``respond()`` payload.
 
-    ``message`` is the baseline string and ``recommendations`` is at most 10
-    ``{"parent_asin": ...}`` entries in ranked order -- the frozen maximum is
-    enforced here regardless of ``top_k``.
+    RECOMMENDATIONS AND A QUESTION IN THE SAME TURN IS STRUCTURAL HERE, not a
+    rule this function follows. Both fields are built from the SAME ranked
+    result in the same expression, so there is no path that returns a question
+    without a recommendation list, and none that suppresses recommendations
+    because the agent decided to ask something. That matters more than it
+    sounds: the evaluator scores the recommendations of EVERY turn, so an agent
+    that asked instead of answering would score zero on the turn it asked --
+    and the natural chat-shaped implementation, "if unsure ask, else
+    recommend", is exactly that bug.
 
-    CP 15.4 IS STRUCTURAL HERE, not a rule this function follows. Both fields
-    are built from the SAME ranked result in the same expression, so there is
-    no code path that returns a question without a recommendation list, and
-    none that suppresses recommendations because the agent decided to ask
-    something. That matters more than it sounds: the evaluator scores the
-    recommendations of EVERY turn, so an agent that asked instead of answering
-    would score zero on the turn it asked, and the natural chat-shaped
-    implementation -- "if unsure, ask; else recommend" -- is exactly that bug.
-
-    ``ask`` defaults to ``None``, which is both the CP 15.1 no-ask baseline
-    and the value every caller passed before Phase 15. It is validated against
-    the contract enum by ``clarify.choose``; this function does not re-check
-    it, because a second copy of the enum is a second thing to keep in step
-    (CP 15.3 lives in one place, with a test that reads the organizer's JSON).
+    ``ask`` is validated against the contract enum by ``clarify.choose``; this
+    function does not re-check it, because a second copy of the enum is a second
+    thing to keep in step.
     """
     recommendations = [
         {"parent_asin": candidate.parent_asin}
@@ -209,44 +173,20 @@ def _to_response(result: RankingResult, top_k: int,
 
 
 class Agent:
-    """Minimum end-to-end agent.
-
-    Per-session ``SessionState`` plus baseline BM25 retrieval, wired through
-    the shared ``Context`` / ``Candidate`` / ``RankingResult`` contracts.
-    Retrieval and ranking are still the weak baseline (BM25 only, no
-    state-driven query). No network or LLM dependency.
-    """
+    """The agent the evaluator imports. One in-memory index, state per session."""
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._states: dict[str, SessionState] = {}
-        # Phase 15, per session, created by ``reset`` alongside the state.
         self._clarify: dict[str, clarify.ClarificationLedger] = {}
         self._build_index()
-        # Phase 11 (CP 11.2). A property of the frozen catalog, so it is
-        # computed once per agent and never per turn.
-        #
-        # Measured cost (D Phase 11 follow-up), since USE_CONFIDENCE_WEIGHTING
-        # currently ships OFF and this therefore runs for a consumer that is
-        # switched off:
-        #
-        #   init without it   5.680s     7 aggregate queries (1 count + 6 slots)
-        #   init with it      5.766s     0 reliability queries per respond()
-        #   delta            +0.086s     +1.52%
-        #
-        # Negligible, so it is left unconditional rather than gated. That
-        # keeps flipping the flag a one-line change with no other edits, which
-        # is the point of an ablation flag. Worth being explicit about what
-        # OFF means: the scoring path and the response are a no-op, NOT that
-        # no work happens. Gating this behind the flag would trade 86ms for a
-        # second thing to remember when the flag moves.
-        #
-        # The result is catalog-global and READ-ONLY: it is handed to every
-        # Context by reference, never copied per turn and never mutated.
+        # Catalog-global and read-only: computed once per agent, handed to every
+        # Context by reference, never copied per turn and never mutated. Left
+        # unconditional rather than gated behind USE_CONFIDENCE_WEIGHTING -- it
+        # costs about 1.5% of index build time, and gating it would trade that
+        # for a second thing to remember when the flag moves.
         self._reliability = match_reliability(slot_coverage(self.connection))
-        # Phase 12 (CP 12.1/12.2). Catalog-wide popularity normalisation, on
-        # the same terms: computed once, read-only, shared by reference.
         self._popularity = popularity_scale(self.connection)
 
     def _build_index(self) -> None:
@@ -300,21 +240,16 @@ class Agent:
         """Initialize (or re-initialize) authoritative state for a session.
 
         A fresh ``SessionState`` replaces any existing state for this
-        ``session_id``, so a re-``reset`` starts clean with nothing carried
-        over. The anonymized profile is deep-copied into the state so later
-        state mutation cannot leak back into the caller's object or across
-        sessions that were reset from the same dict.
+        ``session_id``, so a re-``reset`` starts clean. The profile is
+        deep-copied so later mutation cannot leak back into the caller's object
+        or across sessions reset from the same dict. The clarification ledger is
+        reset alongside it, for the same reason -- one that outlived its session
+        would carry a shopper's dead questions into the next one's.
         """
         self._states[session_id] = SessionState(
             session_id=session_id,
             user_profile=copy.deepcopy(user_profile),
         )
-        # Phase 15. The agent's own side of the conversation -- what it has
-        # asked, and what turned out to be exhausted. Reset with the session
-        # for the same reason the state is: a re-``reset`` must start clean, and
-        # a ledger that outlived its session would carry one shopper's dead
-        # questions into the next one's. Deliberately NOT inside SessionState;
-        # see ``clarify.ClarificationLedger`` for why.
         self._clarify[session_id] = clarify.ClarificationLedger()
 
     def respond(
@@ -324,46 +259,32 @@ class Agent:
         turn: int,
         top_k: int,
     ) -> dict:
-        """One turn end to end.
-
-        State manager (single writer) -> Context -> multi-route retrieval
-        UNION (Phase 5) -> constraint-aware ranking (Phase 6) -> semantic
-        rerank (Phase 14) -> clarification (Phase 15) -> payload. Retrieval,
-        ranking and clarification never touch state.
-        """
+        """One turn end to end."""
         if session_id not in self._states:
             raise RuntimeError("reset must be called before respond")
         state = self._states[session_id]
         if USE_STATE:
             update_state(state, user_message, turn)
-        # CP 15.7, and it must run BEFORE this turn's question is chosen: this
-        # message is the answer to the LAST one, and an attribute the shopper
-        # has just declined must not be a candidate again a few lines below.
+        # This must run BEFORE the turn's question is chosen: the message is the
+        # answer to the LAST question, and an attribute the shopper just
+        # declined must not be a candidate again a few lines below.
         ledger = self._clarify.setdefault(
             session_id, clarify.ClarificationLedger())
         if clarify.USE_CLARIFICATION:
             clarify.safe_observe(ledger, user_message)
         context = _build_context(session_id, user_message, turn, state)
-        # CP 11.2 -- per-slot Match Reliability reaches ranking through the
-        # generic `derived` bag, not a new frozen field (contracts rule).
+        # Catalog-wide signals reach ranking through the generic ``derived``
+        # bag, not a new frozen field.
         context.derived[RELIABILITY_KEY] = self._reliability
         context.derived[POPULARITY_KEY] = self._popularity
 
-        # No build_strategy() call here on purpose. The strategy does not gate
-        # retrieval -- mode-adaptive route selection measured worth +0.000298,
-        # so the route set is a retrieval constant (DEFAULT_ROUTES) instead --
-        # and computing a value nothing reads is the same "mechanism that
-        # changes nothing" this phase deleted USE_ADAPTIVE_STRATEGY for
-        # (D-N4). starter.strategy stays: it is pure, tested, and measured by
-        # tools/phase9_mode_accuracy.py.
-        #
-        # Phase 15 was expected to be its first consumer and is NOT. The mode
-        # would gate how hard to push for a clarification -- and on this
-        # harness there is no cost to asking, so a gate on it could only
-        # subtract. Wiring it in to honour the plan would be a knob that
-        # changes nothing, which is the same thing this comment already
-        # deleted USE_ADAPTIVE_STRATEGY for. See `clarify.choose` for where
-        # the second gate belongs when a deployment gives questions a price.
+        # No strategy call here on purpose. The mode does not gate anything --
+        # mode-adaptive routing measured below the noise floor, and on this
+        # harness asking is free so a mode gate on clarification could only
+        # subtract. Computing a value nothing reads is a mechanism that changes
+        # nothing. ``starter.strategy`` stays: it is pure, tested, and measured
+        # by tools/phase9_mode_accuracy.py. See ``clarify.choose`` for where a
+        # second gate belongs when a deployment gives questions a price.
 
         if USE_MULTI_ROUTE:
             pool = retrieve(self.connection, context, POOL_LIMIT, DEFAULT_ROUTES)
@@ -379,12 +300,11 @@ class Agent:
             # retrieval order, through the same code path.
             metadata = {}
 
-        # Phase 14. Ranking normally truncates to the 10 the response carries;
-        # a reranker handed 10 rows cannot reach the 11-50 band where Phase 13
-        # measured most recoverable targets sitting, so with the flag ON the
-        # ranked list is kept RERANK_TOP_N deep and re-truncated by
-        # `_to_response`. With the flag OFF the depth, the call and the cost
-        # are all exactly what Phase 12 shipped.
+        # Ranking normally truncates to the 10 the response carries. A reranker
+        # handed 10 rows cannot reach the band where most recoverable targets
+        # sit, so with the flag ON the ranked list is kept RERANK_TOP_N deep and
+        # re-truncated by ``_to_response``. With it OFF the depth, the call and
+        # the cost are exactly what they were before the stage existed.
         if reranker.USE_SEMANTIC_RERANK:
             result = constraint_rank(
                 pool, context, metadata,
@@ -395,22 +315,16 @@ class Agent:
         else:
             result = constraint_rank(pool, context, metadata, _effective_k(top_k))
 
-        # Phase 15. Chosen from the RANKED head, after reranking, because the
-        # question is "what would split the answer I am about to give" -- and
-        # from `metadata`, which the ranking path has already looked up for
-        # this exact pool, so clarification adds no query to the turn.
+        # Chosen from the RANKED head, after reranking, because the question is
+        # "what would split the answer I am about to give" -- and from
+        # ``metadata``, which the ranking path already looked up for this exact
+        # pool, so clarification adds no query to the turn.
         #
-        # With the flag OFF this is `None` and the payload is byte-for-byte
-        # the Phase 14 one (CP 15.1). `ask` is never computed in that case:
-        # a no-op arm that still does the work is a no-op that can still be
-        # wrong, and the ablation would stop being free.
+        # ``ask`` is never computed with the flag OFF: a no-op arm that still
+        # does the work is a no-op that can still be wrong.
         #
-        # `safe_choose`, not `choose`. Phase 14 shipped `build_scorer` bare as
-        # an argument to `rerank` -- outside every fallback that stage
-        # advertised -- and got `safe_build_scorer` in review. This line was
-        # the same shape one phase later (D Phase 15 review). Clarification is
-        # strictly optional, so its failure mode is no question, never a lost
-        # turn.
+        # ``safe_choose``, not ``choose`` -- clarification is strictly optional,
+        # so its failure mode must be no question, never a lost turn.
         ask = None
         if clarify.USE_CLARIFICATION:
             ask = clarify.safe_choose(context, ledger, result.ranked,

@@ -1,4 +1,4 @@
-"""Anonymized-profile evidence (Phase 8).
+"""Anonymized-profile evidence.
 
 The profile the evaluator supplies at ``reset`` is deliberately thin:
 
@@ -23,8 +23,8 @@ that carry no catalog-language signal at all (``fit``, ``material``,
 Second, and structurally: profile evidence NEVER reaches ``state.slots``.
 It is read at ranking time as a separate, weakest-tier term. That is what
 makes principle I hold by construction rather than by careful bookkeeping --
-a profile cannot override an explicit request (CP 8.3), a session constraint
-(CP 8.4), or a previous turn's state (CP 8.5), because it never enters the
+a profile cannot override an explicit request, a session constraint, or a
+previous turn's state, because it never enters the
 channel those live in.
 """
 
@@ -62,11 +62,11 @@ ALL_TRAIT_TERMS: frozenset[str] = frozenset(
 
 
 def extract_evidence(user_profile: object) -> dict[str, Any]:
-    """CP 8.2 -- the usable part of a profile, normalized.
+    """The usable part of a profile, normalized.
 
     Returns ``{"tags": [...], "terms": frozenset(...)}``. Safe on ``None``,
     ``{}``, a non-dict, or a profile whose fields are the wrong type
-    (CP 8.6): anything unusable yields empty evidence, never an exception.
+    anything unusable yields empty evidence, never an exception.
     """
     if not isinstance(user_profile, dict):
         return {"tags": [], "terms": frozenset()}

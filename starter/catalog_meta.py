@@ -1,4 +1,4 @@
-"""Compact per-product constraint signals (Phase 6).
+"""Compact per-product constraint signals.
 
 Constraint ranking needs to know, for each candidate, what the catalog
 actually asserts about colour, material, category, brand, size and price.
@@ -10,7 +10,7 @@ candidates in a turn's pool (~3 ms).
 Storing what the catalog ASSERTS -- rather than only what it matches -- is
 what lets ranking tell a real mismatch (the product says "blue", we asked for
 "black") apart from missing metadata (the product names no colour at all).
-The latter is UNKNOWN, never a violation (CP 6.4).
+The latter is UNKNOWN, never a violation.
 """
 
 from __future__ import annotations
@@ -82,12 +82,12 @@ def signals(
         " ".join(sizes),
         price,
         " ".join(sorted(tokens & ALL_TRAIT_TERMS)),
-        # Phase 10. Order-sensitive (title first), so unlike the sets above it
+        # Order-sensitive (title first), so unlike the sets above it
         # is stored as produced rather than sorted.
         " ".join(product_terms(product)),
-        # Phase 12 (CP 12.1). log1p of the review count, precomputed once here
+        # log1p of the review count, precomputed once here
         # rather than per candidate per turn. NULL when the catalog gives no
-        # usable count -- absence is a missing signal, never a zero (CP 12.2).
+        # usable count -- absence is a missing signal, never a zero.
         popularity_feature(product.get("rating_number")),
     )
 
@@ -101,7 +101,7 @@ def popularity_scale(connection: sqlite3.Connection) -> dict[str, float]:
                normalised feature lands in ``[0, 1]`` with no hand-set
                reference;
       missing  the MEDIAN, which is what a product with no usable count scores
-               (CP 12.2) -- absent data is typical, never worst.
+               -- absent data is typical, never worst.
 
     An empty or absent side table yields ``{}``, which consumers read as "no
     statistics" and therefore "no popularity signal": the prior switches

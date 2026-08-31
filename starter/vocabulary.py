@@ -1,35 +1,32 @@
-"""Candidate-scoped vocabulary (Phase 10).
+"""Candidate-scoped vocabulary.
 
 The words that matter are the ones the CURRENT candidates actually use. A
 global catalog vocabulary would answer "what words exist in clothing retail";
 this answers "what words distinguish the 300 products still in play", which is
-the question the clarification layer (Phase 15) needs and the question a
+the question the clarification layer needs and the question a
 free-text term has to be grounded against.
 
-Four checkpoints:
+Four properties:
 
-  CP 10.1  extraction     per-product terms are indexed once (``product_terms``,
-                          stored by ``catalog_meta``); a turn's vocabulary is
-                          the document frequency of those terms WITHIN the
-                          candidate pool (``build_vocabulary``).
-  CP 10.2  empty pool     every function here is total, on ``None`` as well as
-                          on empty. An empty pool, a pool of products with no
-                          indexed terms, a pool whose rows are missing from
-                          the side table, and a ``None`` where a pool or a
-                          vocabulary was expected all yield an empty result
-                          rather than an exception, and grounding against an
-                          empty vocabulary returns nothing rather than falling
-                          back to un-grounded guesses. ``None`` matters
-                          because the consumer reads this out of
-                          ``Context.derived``, where a missing key is
-                          ``None`` (D-V3).
-  CP 10.3  noise control  in-pool frequency bounds, applied only when the pool
-                          is big enough for a frequency to mean anything.
-  CP 10.4  grounding      a free-form word ("warm") maps to the catalog words
-                          this pool MATERIALLY uses ("insulated", "thermal",
-                          "fleece", "lined"). This is a materiality test, not
-                          word-sense disambiguation -- see ``ground`` for the
-                          counterexample that survives it.
+  extraction     per-product terms are indexed once (``product_terms``, stored
+                 by ``catalog_meta``); a turn's vocabulary is the document
+                 frequency of those terms WITHIN the candidate pool.
+
+  empty pool     every function here is total, on ``None`` as well as on empty.
+                 An empty pool, a pool of products with no indexed terms, a
+                 pool whose rows are missing from the side table, and a
+                 ``None`` where a pool or a vocabulary was expected all yield
+                 an empty result rather than an exception. ``None`` matters
+                 because the consumer reads this out of ``Context.derived``,
+                 where a missing key is ``None``.
+
+  noise control  in-pool frequency bounds, applied only when the pool is big
+                 enough for a frequency to mean anything.
+
+  grounding      a free-form word ("warm") maps to the catalog words this pool
+                 MATERIALLY uses ("insulated", "thermal", "fleece", "lined").
+                 A materiality test, not word-sense disambiguation -- see
+                 ``ground`` for the counterexample that survives it.
 
 WHY IN-POOL FREQUENCY, NOT GLOBAL IDF
 
@@ -45,7 +42,7 @@ No embeddings, no network, no model. Term order is fully determined: document
 frequency descending, then the term itself. The grounding map is ordinary
 shopping English, not the evaluator's phrasing -- keying on simulator strings
 would ground the public set well and generalize to nothing, the same rule the
-Phase 9 cue vocabularies follow.
+The cue vocabularies follow.
 
 Nothing in the shipped agent calls this yet; see ``build_vocabulary`` for why
 that is deliberate.
@@ -67,7 +64,7 @@ INDEX_TERM_LIMIT = 40
 
 # Below this many candidates, an in-pool document frequency is not a
 # statistic. Two of three candidates sharing a word says nothing about whether
-# the word discriminates, so CP 10.3's frequency bounds are skipped entirely
+# the word discriminates, so the frequency bounds are skipped entirely
 # and only structural filtering applies.
 NOISE_FLOOR_POOL = 8
 
@@ -93,7 +90,7 @@ MAX_DOCUMENT_RATIO = 0.8
 #
 # 5% of a 300-candidate pool is 15 products: enough that the word names a real
 # option among these candidates rather than one seller's phrasing. Measured
-# against the hostile grid in D's Phase 10 review (21 map keys x 4 non-clothing
+# against a hostile grid (21 map keys x 4 non-clothing
 # pools), the floor cuts non-empty results from 59/84 to 19/84 while keeping
 # 6 of 6 of the senses this phase claims. Those 6 survive unchanged from a 0%
 # floor to a 10% one and break only at 15%, so 5% sits mid-plateau rather than
@@ -140,7 +137,7 @@ BOILERPLATE = frozenset({
     "usa", "material", "materials", "made-in", "occasion", "suitable",
 })
 
-# CP 10.4 -- free-form shopper language to the catalog words that express it.
+# free-form shopper language to the catalog words that express it.
 #
 # The shopper says "warm"; the catalog says "insulated", "thermal", "fleece".
 # This map only PROPOSES; ``ground`` keeps just the words the current
@@ -178,7 +175,7 @@ GROUNDING: dict[str, tuple[str, ...]] = {
 
 
 def product_terms(product: dict) -> list[str]:
-    """CP 10.1 (index side) -- the bounded term list stored for one product.
+    """the bounded term list stored for one product.
 
     Title first, then the category path, then features, then description:
     the order the cap truncates against, so what survives is what names the
@@ -215,7 +212,7 @@ def pool_terms(
     which runs every turn and does not need this column -- keeps paying for
     exactly what it reads.
 
-    A product with no row simply comes back absent (CP 10.2); an empty input
+    A product with no row simply comes back absent; an empty input
     issues no query at all.
     """
     # Filter BEFORE stringifying: ``str(None)`` is "None", which is truthy and
@@ -237,7 +234,7 @@ def build_vocabulary(
     candidates: list[Candidate],
     limit: int = VOCABULARY_LIMIT,
 ) -> dict[str, Any]:
-    """CP 10.1 / 10.2 / 10.3 -- the vocabulary of one turn's candidate pool.
+    """the vocabulary of one turn's candidate pool.
 
     Returns a plain dict, not a new type: per the contracts rule, a new signal
     adds keys to a generic container (``Context.derived``) rather than a
@@ -248,7 +245,8 @@ def build_vocabulary(
                     capped, ordered by frequency descending then term
         dropped     why terms were discarded, for diagnostics
 
-    Not called from ``agent.respond``. Phase 15 is the consumer, and this repo
+    Not called from ``agent.respond``. Clarification is the consumer, and this
+    repo
     just deleted a ``build_strategy`` call for computing a value nothing read;
     wiring an unread vocabulary in would repeat that. It costs one indexed
     query per turn when a consumer arrives.
@@ -301,7 +299,7 @@ def most_discriminative(
     to ask about, and is why ``terms`` is capped generously rather than
     pre-filtered to the "top" terms by frequency.
 
-    Total on an empty vocabulary (CP 10.2).
+    Total on an empty vocabulary.
     """
     vocabulary = vocabulary if isinstance(vocabulary, dict) else {}
     pool_size = vocabulary.get("pool_size") or 0
@@ -320,7 +318,7 @@ def ground(
     vocabulary: dict[str, Any],
     min_support: float = MIN_MAPPED_SUPPORT,
 ) -> tuple[str, ...]:
-    """CP 10.4 -- a free-form word to the pool's own words for it.
+    """a free-form word to the pool's own words for it.
 
     Two sources: the word itself when the candidates use it, then the mapped
     catalog words the candidates use MATERIALLY -- in at least ``min_support``
@@ -348,7 +346,7 @@ def ground(
     and most like it, but polysemy is not solvable at this layer without a
     model, and no caller should be written as though it were.
 
-    So a consumer -- Phase 15 -- must treat a grounded word as a CANDIDATE
+    So a consumer must treat a grounded word as a CANDIDATE
     phrasing to consider, never as evidence that the pool shares the
     shopper's sense. ``grounding_support`` exposes the numbers for a consumer
     that wants a stricter bar than the default.

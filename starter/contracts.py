@@ -1,6 +1,6 @@
 """Shared type contracts for the Shopping Copilot pipeline.
 
-FROZEN as of CP 0.2 (Phase 0 - Contracts).
+FROZEN. Changes go through docs/interface_mutation_rule.md.
 
 The five dataclasses below are the contract surface between Person A
 (production implementation) and reviewers B / C / D. Their field sets AND
@@ -18,7 +18,7 @@ Principles enforced by these shapes:
 * ``SessionState`` keeps evidence, not raw conversation history: structured
   ``slots``, persistent free-text ``evidence``, and ``provenance`` for every
   change. Evidence Confidence / Match Reliability are not frozen as
-  top-level fields here; they live inside slot entries from Phase 11.
+  top-level fields here; they live inside slot entries.
 * Route-specific and strategy-specific knobs live in **generic containers**
   (``Candidate.route_scores``, ``Strategy.route_weights`` / ``Strategy.params``)
   so new retrieval routes and strategy parameters can be added in later
@@ -26,7 +26,7 @@ Principles enforced by these shapes:
   normalization is still forbidden; ``route_scores`` carries raw route scores.
 * Every type is constructible with no arguments and is safe to use in that
   empty form. An explicit ``None`` passed for ANY field at construction is
-  normalized to that field's declared default (CP 0.4 frozen None rule):
+  normalized to that field's declared default:
   ``""`` / ``0`` / ``"unknown"`` for scalars, a fresh empty container for
   dict/list fields, ``SessionState()`` for ``Context.state``. Construction
   never raises on ``None``; the resulting object always satisfies its own
@@ -51,7 +51,7 @@ __all__ = [
 
 
 def _normalize_none_fields(instance: Any) -> None:
-    """CP 0.4 frozen None rule.
+    """The frozen None rule.
 
     Any field left as ``None`` after construction is replaced by that
     field's declared default -- ``field.default`` for scalars (``""``,
@@ -74,7 +74,7 @@ def _normalize_none_fields(instance: Any) -> None:
 class SessionState:
     """Authoritative per-session conversational state.
 
-    Mutated only by the deterministic state manager (Phase 2+).
+    Mutated only by the deterministic state manager.
 
     Fields
     ------
@@ -133,7 +133,7 @@ class Context:
 
 @dataclass
 class Strategy:
-    """Adaptive strategy decision for the current turn (Phase 9).
+    """Adaptive strategy decision for the current turn.
 
     ``mode`` is ``"buying"``, ``"browsing"``, or ``"unknown"``. ``routes``
     is the ordered list of retrieval route names to run for the UNION.
@@ -192,10 +192,10 @@ class RankingResult:
     """Output of the ranking stage.
 
     ``ranked`` is the candidate list ordered best-to-worst. ``diagnostics``
-    is keyed by ``parent_asin`` and, from Phase 6, exposes base score,
+    is keyed by ``parent_asin`` and exposes base score,
     attribute contribution, violation penalty, popularity prior, final
     score, and rank. Clarification wording is NOT owned here; the
-    clarification layer (Phase 15) adds it.
+    clarification layer adds it.
     """
 
     ranked: list[Candidate] = field(default_factory=list)

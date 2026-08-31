@@ -1,4 +1,4 @@
-"""Deterministic session-state manager (Phase 2 + Phase 3 + Phase 4).
+"""Deterministic session-state manager.
 
 Single authoritative writer of ``SessionState``. Given a raw user message it:
 
@@ -7,12 +7,11 @@ Single authoritative writer of ``SessionState``. Given a raw user message it:
 * validates the delta before it can touch state -- unknown slots, invalid
   operations, and out-of-range / NaN confidences are rejected; extractor
   failure yields an empty delta and the previous state is kept intact
-  (Phase 4). ``validate_delta`` is a no-op on the deterministic extractor's
+  ``validate_delta`` is a no-op on the deterministic extractor's
   output; it guards a future / fuzzy / LLM delta source;
 * detects intent-override cues deterministically ("actually" -> REPLACE,
   "also" -> ADD, "not leather" -> REMOVE) and applies the operation
-  slot-specifically -- an override to one slot never disturbs the others
-  (CP 3.2 golden);
+  slot-specifically -- an override to one slot never disturbs the others;
 * accumulates the result into ``state.slots``; superseded values are marked
   in ``state.provenance``;
 * records every change in ``state.provenance``;
@@ -20,16 +19,16 @@ Single authoritative writer of ``SessionState``. Given a raw user message it:
   content tokens minus override cues, plumbing words, slot-markers and every
   extracted slot value, so an entry never carries a structured constraint --
   superseding one slot value cannot erase unrelated intent in the same
-  entry (CP 2.8 / CP 3.6 / D Finding 1). Entries:
+  entry. Entries:
   ``{"turn", "text", "normalized", "status": "active"}``.
 
-Slot value schema (approved at CP 2.1):
+Slot value schema:
 
     state.slots[name] = {"values": list[str], "cardinality": "single" | "multi"}
 
 ``budget`` additionally carries ``"bounds": {"min": float|None, "max": float|None}``.
 Single-valued slots hold 0-1 entries in ``values``; the uniform list shape lets
-Phase 3 REPLACE / ADD / REMOVE operate without isinstance branching, and Phase 11
+REPLACE / ADD / REMOVE operate without isinstance branching, and confidence
 EC / MR attach as extra keys on the same dict.
 
 Retrieval and ranking never call into this module -- they treat ``SessionState``
@@ -70,7 +69,7 @@ _NON_ANSWER_RE = re.compile(
     re.I,
 )
 
-# Phase 3 override cues, detected deterministically on the raw message.
+# Override cues, detected deterministically on the raw message.
 # REPLACE cue -> the new value supersedes the current one; ADD cue -> keep
 # both. Negation directly before a known value -> REMOVE it.
 _REPLACE_CUE_RE = re.compile(
@@ -114,7 +113,7 @@ _OVERRIDE_PLUMBING = {
 # at all. Left in, they reach starter/reranker.py as query terms, get a high
 # in-pool IDF for being rare in the catalog, and rank candidates on which
 # product description happens to contain the word "still". That was 31% of
-# the reranker's total applied weight (D Phase 14 review, Finding 2), and
+# the reranker's total applied weight, and
 # `still` alone was 8.6x the top real product word.
 #
 # Three phases of this project banked a metric that measured the simulator.
@@ -162,7 +161,7 @@ SLOT_CARDINALITY: dict[str, str] = {
 # Deterministic extractors (keyword / regex only).
 # --------------------------------------------------------------------------
 
-# Curated keyword -> canonical category. Weak by design; Phase 5 grounds
+# Curated keyword -> canonical category. Weak by design; retrieval grounds
 # category against the catalog. First matching token in the message wins.
 _CATEGORY_KEYWORDS: dict[str, str] = {
     "jacket": "jacket", "jackets": "jacket", "coat": "coat", "coats": "coat",
@@ -387,16 +386,16 @@ def _is_negated(message: str, value: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Evidence Confidence (Phase 11, CP 11.1) -- how much the shopper meant it.
+# Evidence Confidence -- how much the shopper meant it.
 #
-# Phase 4 already built the RECEIVING half of this: validate_delta cleans and
+# Delta validation already built the RECEIVING half of this: it cleans and
 # clamps a `confidence` on a delta entry, and stores it when below 1.0. What
 # was missing is a producer and a persister. Extraction now assigns one and
 # apply_delta carries it onto the slot entry, where the contract has always
 # said it would live ("Evidence Confidence ... live inside slot entries from
-# Phase 11", contracts.py).
+# the slot entry, contracts.py).
 #
-# Absent means 1.0 throughout, which is Phase 4's convention and is what keeps
+# Absent means 1.0 throughout, which is the validator's convention and keeps
 # every pre-existing caller and stored state unchanged.
 #
 # Confidence is per MESSAGE, not per value: a turn is one speech act, and the
@@ -453,7 +452,7 @@ def _has_unnegated(tokens: list[str], vocabulary: frozenset) -> bool:
     "A key requirement is: leather" is a requirement. "Leather is not
     required" is the shopper WITHDRAWING one, and reading it as a requirement
     scored the constraint at maximum confidence precisely when they had just
-    relaxed it (D Phase 12 review, P2).
+    relaxed it.
     """
     for index, token in enumerate(tokens):
         if token not in vocabulary:
@@ -465,7 +464,7 @@ def _has_unnegated(tokens: list[str], vocabulary: frozenset) -> bool:
 
 
 def evidence_confidence(message: object) -> float:
-    """CP 11.1 -- how firmly this turn asserts whatever it mentions.
+    """how firmly this turn asserts whatever it mentions.
 
     Deterministic and offline, read from the shopper's phrasing, strongest
     signal first:
@@ -485,7 +484,7 @@ def evidence_confidence(message: object) -> float:
     maybe denim" is a hedged 0.4 -- the shopper is replacing one thing with
     something they are unsure of -- while "actually, make it denim" is a
     confident 0.9. Ordering correction above hedge scored that first message
-    0.9, which the D Phase 11 interleaving test caught.
+    0.9, which the interleaving test caught.
     """
     if not isinstance(message, str) or not message.strip():
         return EC_STATED
@@ -568,9 +567,9 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
             entry["cue"] = "replace"
         delta["budget"] = entry
 
-    # CP 11.1 -- one confidence for the turn, on every entry it produced.
+    # one confidence for the turn, on every entry it produced.
     # validate_delta clamps it and drops it again when it is 1.0, so a fully
-    # confident turn produces exactly the delta it produced before Phase 11.
+    # confident turn produces exactly the delta it would without confidence.
     confidence = evidence_confidence(message)
     for entry in delta.values():
         entry["confidence"] = confidence
@@ -579,7 +578,7 @@ def extract_delta(message: str) -> dict[str, dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------
-# Delta validation (Phase 4) -- the guard between any delta source and the
+# Delta validation -- the guard between any delta source and the
 # state manager.
 # --------------------------------------------------------------------------
 
@@ -596,8 +595,7 @@ def _clean_confidence(value: object) -> float | None:
     """Confidence in ``(0, 1]``, or ``None`` meaning "drop this entry".
 
     ``None`` -> ``1.0`` (an absent confidence is trusted). ``NaN`` or
-    non-numeric -> drop. Out of range -> clamped to ``[0, 1]``. Zero -> drop
-    (CP 4.3).
+    non-numeric -> drop. Out of range -> clamped to ``[0, 1]``. Zero -> drop.
     """
     if value is None:
         return 1.0
@@ -615,11 +613,11 @@ def validate_delta(delta: object) -> dict[str, dict[str, Any]]:
     """Sanitize a delta from any source before ``apply_delta`` sees it.
 
     * non-dict input, or an entry that is not a dict -> dropped;
-    * unknown slot name -> dropped (CP 4.1);
+    * unknown slot name -> dropped;
     * explicit ``op`` outside ``{SET, REPLACE, ADD, REMOVE}`` -> entry
-      dropped (CP 4.2);
+      dropped;
     * ``confidence`` coerced per ``_clean_confidence``; drop-worthy -> entry
-      dropped (CP 4.3);
+      dropped;
     * ``values`` / ``remove`` kept only if a list of ``str``; entry with
       neither -> dropped;
     * ``cardinality`` forced to the known value; unknown ``cue`` -> dropped;
@@ -666,7 +664,7 @@ def validate_delta(delta: object) -> dict[str, dict[str, Any]]:
 
 def safe_extract_delta(message: str) -> dict[str, dict[str, Any]]:
     """``extract_delta`` guarded to never raise -- any failure yields an
-    empty delta (CP 4.4).
+    empty delta.
 
     A standalone helper for callers that want a non-throwing extract.
     ``update_state`` does not use it: it calls ``extract_delta`` inside its
@@ -702,8 +700,7 @@ def _record(
 
 def _supersede_evidence(state: SessionState, dead_values: list[str]) -> None:
     """Invalidate the stale assertion of a now-dead constraint in free-text
-    evidence, WITHOUT touching unrelated intent in the same entry
-    (CP 3.6 / D Finding 1).
+    evidence, WITHOUT touching unrelated intent in the same entry.
 
     Evidence is distilled to residual tokens at creation, so a dead slot
     value normally never reaches ``normalized``. This is the safety net for
@@ -747,8 +744,8 @@ def superseded_values(state: SessionState, slot: str) -> set[str]:
 def _confidence_of(entry: object) -> float:
     """A slot or delta entry's Evidence Confidence; absent means fully meant.
 
-    The absent-is-1.0 convention is Phase 4's (``_clean_confidence``), kept so
-    that state written before Phase 11 -- and any entry from a turn the
+    The absent-is-1.0 convention is the validator's (``_clean_confidence``),
+    kept so that older state -- and any entry from a turn the
     shopper stated plainly -- reads back identically.
     """
     if not isinstance(entry, dict):
@@ -789,10 +786,10 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
     Operation, highest priority first:
 
     * an explicit validated ``op`` (SET / REPLACE / ADD / REMOVE) is
-      authoritative -- a future parser drives operations directly (CP 4.2);
-    * else the Phase 3 cue / ``remove`` semantics ("actually" -> REPLACE,
+      authoritative -- a future parser drives operations directly;
+    * else the cue / ``remove`` semantics ("actually" -> REPLACE,
       "also" -> ADD, negation -> REMOVE);
-    * else the Phase 2 default: ADD for multi-valued, SET for single-valued.
+    * else the default: ADD for multi-valued, SET for single-valued.
 
     Semantics:
     SET / REPLACE -> slot value set becomes exactly ``values`` (multi-valued
@@ -800,11 +797,11 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
     deduplicated; a single-valued slot never accumulates -> ADD collapses to
     REPLACE (D Finding 1). REMOVE -> strip ``values`` (explicit op) or the
     negated ``remove`` values (cue path) from the slot; drop the slot if
-    nothing survives; superseded evidence is invalidated (CP 3.6).
+    nothing survives; superseded evidence is invalidated.
 
-    A slot the delta does not mention is never touched (CP 2.2). Superseded
-    values do not spontaneously return (CP 3.6). Defensive on a raw delta:
-    unknown slot / invalid explicit ``op`` -> skipped (CP 4.1 / 4.2).
+    A slot the delta does not mention is never touched. Superseded
+    values do not spontaneously return. Defensive on a raw delta:
+    unknown slot / invalid explicit ``op`` -> skipped.
     """
     for slot, incoming in delta.items():
         if not isinstance(incoming, dict) or slot not in SLOT_CARDINALITY:
@@ -842,7 +839,7 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
                     # shopper's commitment to the ones that remain: "maybe
                     # leather and denim" then "no leather" must leave denim
                     # hedged, not promote it to maximum insistence by dropping
-                    # its confidence (D Phase 12 review, Q1). Bounds are
+                    # its confidence. Bounds are
                     # carried for the same reason -- defensively, since a
                     # single-valued budget cannot reach here with survivors.
                     survivor: dict[str, Any] = {
@@ -882,7 +879,7 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
                 # Nothing new to union -- but the shopper may have restated an
                 # existing value MORE firmly ("maybe leather" -> "leather is a
                 # hard requirement"). That is not a no-op: the escalation is
-                # the whole content of the turn (CP 11.1). Confidence only
+                # the whole content of the turn. Confidence only
                 # ever rises here; a hedged restatement of something already
                 # insisted on does not soften it.
                 if existing is not None:
@@ -898,7 +895,7 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
             }
             if new_bounds is not None:
                 entry["bounds"] = new_bounds
-            # CP 11.1 -- a union keeps the STRONGEST statement made about the
+            # a union keeps the STRONGEST statement made about the
             # slot. Adding a hedged value to a slot the shopper already
             # insisted on does not soften the insistence.
             _carry_confidence(entry, incoming, existing, combine=max)
@@ -916,7 +913,7 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
             and not remove
             # Restating the same constraint MORE firmly is not a no-op: the
             # shopper escalated from "maybe leather" to "it must be leather"
-            # and the slot has to record that (CP 11.1).
+            # and the slot has to record that.
             and _confidence_of(incoming) <= _confidence_of(existing)
         )
         if unchanged:
@@ -924,7 +921,7 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
         entry = {"values": list(positive), "cardinality": cardinality}
         if new_bounds is not None:
             entry["bounds"] = new_bounds
-        # CP 11.1 -- a replacement replaces the confidence too: the old
+        # a replacement replaces the confidence too: the old
         # statement is gone, so its confidence must not outlive it.
         _carry_confidence(entry, incoming, existing, combine=None)
         state.slots[slot] = entry
@@ -941,14 +938,14 @@ def apply_delta(state: SessionState, delta: dict[str, dict[str, Any]], turn: int
 def update_evidence(
     state: SessionState, message: str, delta: dict[str, dict[str, Any]], turn: int
 ) -> None:
-    """CP 2.8 / CP 3.6 - keep residual free-text as distilled evidence.
+    """Keep residual free-text as distilled evidence.
 
     ``normalized`` is the DISTILLED content: message tokens minus override
     cues, override-plumbing words, request-framing words, slot-marker words,
     and every extracted slot value. So an entry never contains a structured
     constraint token -- superseding ``leather`` cannot touch an entry that
     only says
-    ``winter hiking`` (B Phase 3 blocker fix). An override message is not
+    ``winter hiking``. An override message is not
     skipped wholesale: its genuine residual ("actually denim for winter
     hiking" -> ``winter hiking``) is retained.
 
@@ -1000,10 +997,10 @@ def update_state(state: SessionState, message: object, turn: object) -> SessionS
 
     Deterministic and offline. Mutates ``state`` in place and returns it.
 
-    Phase 4 robustness: the delta is validated before it can touch state,
+    Robustness: the delta is validated before it can touch state,
     and the whole update is wrapped -- if extraction, validation, or
     application fails for any reason, ``state`` is rolled back to exactly
-    what it was before this turn (CP 4.4). A no-op turn (nothing extracted,
+    what it was before this turn. A no-op turn (nothing extracted,
     everything rejected) is not a failure; it simply leaves state unchanged.
     """
     text = message if isinstance(message, str) else ""

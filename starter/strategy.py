@@ -1,9 +1,9 @@
-"""Adaptive strategy (Phase 9).
+"""Adaptive strategy.
 
 Decides HOW to run a turn -- which retrieval routes, with what relative
 weight -- from how specific the shopper has been so far. It decides nothing
 about individual products: the ``Strategy`` object carries no ``parent_asin``
-and the ranking layer never reads it (CP 9.6). Strategy is workflow; ranking
+and the ranking layer never reads it. Strategy is workflow; ranking
 is product order.
 
 Two modes:
@@ -14,11 +14,10 @@ Two modes:
     browsing   the shopper is still exploring: a category at most, plus
                soft or use-case language. Favour reach.
 
-Classification is deterministic and recomputed from scratch every turn
-(CP 9.3), so it follows the state rather than latching: a browsing session
-becomes buying the moment specifics arrive (CP 9.4), and an override that
-replaces the specifics re-derives the strategy from the NEW state, never the
-old one (CP 9.5).
+Classification is deterministic and recomputed from scratch every turn, so it
+follows the state rather than latching: a browsing session becomes buying the
+moment specifics arrive, and an override that replaces the specifics re-derives
+the strategy from the NEW state, never the old one.
 
 Four rules, strongest evidence first (``classify_mode_with_reason`` names
 which one fired):
@@ -44,16 +43,16 @@ nothing. Accuracy against the live dialogue is measured, not asserted:
 coverage on four opening templates, not evidence of generalization.
 
 Per-turn across the whole dialogue it reads 64.3%, and that number is not an
-error rate. Before Phase 15 every turn after the first was a harness
+error rate. Before clarification landed every turn after the first was a harness
 non-answer, so the figure was 100% by having nothing to disagree with. Now
 the agent asks and the shopper discloses, and a browsing session that has
-just named a material is classified BUYING -- which is CP 9.4 working
+just named a material is classified BUYING -- which is the classifier working
 exactly as specified, scored as a miss against a ``scenario_type`` label that
 describes how the session opened rather than what the shopper has since said.
 The classifier is being marked against the thing it was designed to stop
 agreeing with.
 
-Nothing in the shipped agent reads the mode. Phase 15 was expected to be the
+Nothing in the shipped agent reads the mode. Clarification was expected to be the
 first consumer and deliberately is not: see ``agent.respond`` and
 ``clarify.choose`` for why a mode gate on the ask decision would have been a
 knob that changes nothing on a harness where asking is free.
@@ -119,7 +118,7 @@ FILLER_CUES = frozenset({
 # as volunteered concrete detail.
 _VAGUE_TOKENS = SOFT_CUES | FILLER_CUES | BROWSING_CUES
 
-# Route plan. UNIFORM across modes -- corrected after the Phase 9 review.
+# Route plan. UNIFORM across modes -- corrected after review.
 #
 # The first version of this file made buying and browsing select different
 # route sets and reported the difference as the checkpoint's gain. That was
@@ -134,7 +133,8 @@ _VAGUE_TOKENS = SOFT_CUES | FILLER_CUES | BROWSING_CUES
 # once in ``retrieval.DEFAULT_ROUTES`` -- and taken from there rather than
 # restated, so the two cannot drift apart.
 #
-# `classify_mode` is kept because Phase 15 wants it (how hard to push for a
+# `classify_mode` is kept because clarification may want it (how hard to push
+# for a
 # clarification differs between a shopper who has named specifics and one
 # still exploring), not because it earns anything here.
 _ROUTES = list(DEFAULT_ROUTES)
@@ -180,7 +180,7 @@ def _evidence_tokens(context: Context) -> set[str]:
     """Every token the shopper has volunteered as still-active free text.
 
     Superseded evidence is excluded, so an override cannot leave stale
-    wording deciding the mode (CP 9.5).
+    wording deciding the mode.
     """
     out: set[str] = set()
     for entry in context.state.evidence:
@@ -225,7 +225,7 @@ def _slot_tokens(context: Context) -> set[str]:
 def _has_concrete_evidence(context: Context) -> bool:
     """True when volunteered free text names something checkable.
 
-    Restored after the Phase 9 review (C). ``normalized`` evidence has already
+    Restored after review. ``normalized`` evidence has already
     had the extracted slot values, the override plumbing and the slot-marker
     words removed by ``state.update_evidence``, so what survives is close to
     genuine volunteered detail. A surviving token is concrete unless it is
@@ -236,7 +236,7 @@ def _has_concrete_evidence(context: Context) -> bool:
       * a restatement of a value already captured in a slot.
 
     Superseded evidence is excluded via ``_evidence_tokens``, so an override
-    that replaces the detail also withdraws the buying signal (CP 9.5).
+    that replaces the detail also withdraws the buying signal.
     """
     slot_tokens = _slot_tokens(context)
     for token in _evidence_tokens(context):
@@ -281,7 +281,7 @@ def classify_mode_with_reason(context: Context) -> tuple[str, str]:
     if tokens & BROWSING_CUES or evidence & BROWSING_CUES:
         return BROWSING, "browsing language"
     # A concrete detail the extraction vocabulary has no slot for -- "buckle
-    # closure", "stainless steel band". Still a spec, and the CP 9.2 case the
+    # closure", "stainless steel band". Still a spec, and the case the
     # override openings are made of.
     #
     # This ranks BELOW the browsing declaration, unlike a filled slot, because
@@ -300,7 +300,7 @@ def classify_mode_with_reason(context: Context) -> tuple[str, str]:
 
 
 def classify_mode(context: Context) -> str:
-    """CP 9.1 / 9.2 -- ``buying`` or ``browsing`` for the CURRENT state.
+    """``buying`` or ``browsing`` for the CURRENT state.
 
     Recognised specifics win: once a shopper names a colour, material, brand,
     size or budget, they are buying even if they also say "exploring". Next,
@@ -312,7 +312,7 @@ def classify_mode(context: Context) -> str:
 
 
 def build_strategy(context: Context) -> Strategy:
-    """CP 9.3 -- the full strategy for this turn, derived from state only.
+    """the full strategy for this turn, derived from state only.
 
     Pure: reads ``context``, mutates nothing, and holds no product identity.
     """
