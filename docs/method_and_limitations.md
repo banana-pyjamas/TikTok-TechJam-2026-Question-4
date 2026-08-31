@@ -31,6 +31,31 @@ Each stage is behind an ablation flag and each was measured OFF vs ON on the
 | + lexical reranker | 0.243930 | +0.061672 |
 | **+ clarification (ships)** | **0.722979** | **+0.479049** |
 
+### Staged integration, and what it decided
+
+`python3 -m tools.phase16_integration` enables the features one at a time in
+the roadmap's order, gates each rung on both significance tests against the
+rung below it, and **reverts any rung that does not establish a gain**. Four
+features ship OFF or do not exist, and each is a measured decision rather
+than an omission:
+
+| step | feature | outcome |
+| --- | --- | --- |
+| 1 | Core only | baseline, TS 0.134566 |
+| 2 | Profile | **reverted** — +0.0077, 7/5, p = 0.77; CI straddles zero |
+| 3 | Adaptive Strategy | no flag — worth +0.000298, deleted in Phase 9 |
+| 4 | Candidate Vocabulary | not separable — it *is* the reranker's index |
+| 5 | EC/MR | **reverted** — exactly inert on core, 0/0 discordant |
+| 6 | Popularity | kept — +0.047692, 10/0, p = 0.0020 |
+| 7 | Dense | not implemented — measured worse, Phase 13 |
+| 8 | Semantic Reranker | kept — +0.061672, 15/0, p = 0.0001 |
+| 9 | Clarification | kept — +0.479049, 114/1, p = 0.0000 |
+
+The ladder's end state matches the committed flags on all eight and
+reproduces `COMMITTED_TECHNICAL_SCORE` exactly, so no flag ships on history
+or intuition. Whole ladder: **+0.588413**, 139/1 discordant, p = 0.0000,
+bootstrap CI [+0.532, +0.642].
+
 ## Model choice
 
 **There is no model.** That is a choice, not an omission, and it was made
@@ -149,7 +174,7 @@ reproduces all of this.
 - Every tunable is registered in `tools/config_guard.py` and checked before
   any measurement runs; `python3 -m tools.config_guard` verifies the whole
   configuration and fails loudly.
-- 592 unit tests, run on the certified Python 3.9.6.
+- 607 unit tests, run on the certified Python 3.9.6.
 - Every measured number in the source comments names the tool that
   regenerates it.
 

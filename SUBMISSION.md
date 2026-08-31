@@ -91,8 +91,9 @@ have reached the arithmetic.
 ## Verifying the submission
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 592 tests
+python3 -m unittest discover -s tests -t .   # 607 tests
 python3 -m tools.config_guard                # every pinned flag and constant
+python3 -m tools.phase16_integration         # staged enable, one feature at a time
 python3 -m tools.disclosure                  # latency, tokens, cost
 ```
 

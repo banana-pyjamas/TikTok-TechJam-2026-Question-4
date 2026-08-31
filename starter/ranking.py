@@ -71,9 +71,25 @@ from starter.reliability import reliability_of
 
 # Ablation flag for the profile prior (Phase 8).
 #
-# OFF: measured net-negative on the public set -- TS 0.131194 -> 0.127929,
-# HR 0.155 -> 0.150 (MRR alone ticks up, 0.080312 -> 0.081097). The roadmap
-# gates Phase 8 on "only if justified after core evaluation"; it is not.
+# OFF, and Phase 16's staged ladder is the reason it STAYS off -- which is a
+# different reason from the one this comment used to give alone.
+#
+# Phase 8 measured it net-negative: TS 0.131194 -> 0.127929, HR 0.155 ->
+# 0.150 (MRR alone ticks up, 0.080312 -> 0.081097). Phase 16 enabled it on
+# core at its own rung and measured the point estimate POSITIVE: 0.134566 ->
+# 0.142229, +0.007663. The sign flipped between two configurations that were
+# both called "core", which is the sharpest illustration in this repo of why
+# a delta is a fact about a pipeline and not about a feature.
+#
+# Neither measurement establishes anything, and that is what decides it:
+# Phase 16 reports 7/5 discordant, p = 0.7744 on hits and p = 0.5585 on the
+# paired permutation, with a 95% CI of [-0.0178, +0.0332] straddling zero.
+# The burden is on the change. A feature whose sign is not stable across two
+# baselines and whose interval contains zero has not met it, and "the point
+# estimate was positive that time" is not a reason to ship.
+#
+# The roadmap gates Phase 8 on "only if justified after core evaluation"; it
+# is not.
 #
 # The cause is in the data, not the implementation. The profile carries
 # almost no product-discriminative signal: purchase_frequency is the SAME
@@ -173,10 +189,18 @@ DIAGNOSTIC_KEYS = frozenset({
 # of turns, CP 11.4's case occurs 86 times in 1146 (7.5%), and the target's
 # rank moves on 19 turns.
 #
-# So "no measured harm because it does nothing" is no longer available. It
-# now does something, and what it does measures -0.001737 TS at 1/1
-# discordant, p = 1.0000 -- no verdict, and a point estimate on the wrong
-# side of zero. Same shipping decision, different and weaker reason: it used
+# So "no measured harm because it does nothing" is no longer available AT
+# THE TOP OF THE STACK. It now does something there, and what it does
+# measures -0.001737 TS at 1/1 discordant, p = 1.0000 -- no verdict, and a
+# point estimate on the wrong side of zero.
+#
+# On CORE it is still exactly inert, and Phase 16's ladder is the cleanest
+# demonstration this repo has: enabled at its own rung, over core alone, it
+# reproduces the previous rung to six decimals with 0/0 discordant and 0 of
+# 200 sessions moved. Both statements are true of the same code, and the
+# difference between them is everything Phase 15 put into the dialogue --
+# the mechanism needs constraints to weigh, and until the agent asked, there
+# were none. Same shipping decision, different and weaker reason: it used
 # to ship OFF because it was inert, and it ships OFF now because the burden
 # is on the change and a live mechanism with a negative point estimate has
 # not met it.
