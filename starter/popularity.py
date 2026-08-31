@@ -65,7 +65,7 @@ from typing import Any
 # The weight of the whole prior, before decay. An order of magnitude below
 # W_MATCH so that satisfying one constraint always beats being the most
 # reviewed product in the catalog, by construction rather than by luck.
-W_POPULARITY = 0.008
+W_POPULARITY = 1.2
 
 # Normalisation reference, when the catalog cannot supply one.
 DEFAULT_SCALE = 13.0

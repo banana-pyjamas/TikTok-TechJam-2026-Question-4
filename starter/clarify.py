@@ -91,7 +91,7 @@ WILDCARD = "other"
 # tests/test_clarify.py, so adding a slot without deciding whether it is
 # askable breaks loudly.
 SCORABLE_ATTRIBUTES = (
-    "category", "color", "material", "brand", "size", "budget",
+    "color", "material", "size", "budget",
 )
 
 # The second tier: askable but not value-scorable, because there is no catalog

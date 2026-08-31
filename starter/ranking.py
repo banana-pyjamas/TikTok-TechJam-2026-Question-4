@@ -77,8 +77,8 @@ USE_PROFILE = False
 # candidate loses less than a strong retrieval score can supply, so one
 # mistaken extracted constraint demotes a candidate without burying it. A
 # violation therefore always costs less than a match gains.
-W_MATCH = 0.10
-W_PENALTY = 0.02
+W_MATCH = 0.40
+W_PENALTY = 0.20
 
 # The profile prior is the weakest tier by construction. Priority is: current
 # explicit request > active session state > profile. W_PROFILE is held an order
