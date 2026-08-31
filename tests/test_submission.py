@@ -15,8 +15,10 @@ goes red before the disclosure goes stale.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import sys
+import sysconfig
 import unittest
 from pathlib import Path
 
@@ -34,6 +36,42 @@ _FORBIDDEN = {
     "sentence_transformers", "numpy", "scipy", "sklearn", "pandas",
     "subprocess", "os",
 }
+
+
+def _is_stdlib(name: str) -> bool:
+    """True if ``name`` resolves to the standard library of THIS interpreter.
+
+    Not ``sys.stdlib_module_names``: that is 3.10+, and this submission
+    certifies on 3.9.6, so using it made the suite ERROR on the exact
+    interpreter SUBMISSION.md claims it passes on (D Phase 15 review, item 1).
+    A test that cannot run where the claim is made is worse than no test.
+
+    Resolving the spec is also a stronger check than a name lookup. A
+    third-party package that shadows a stdlib name would pass a name test and
+    fails this one, because the resolved origin lands in site-packages
+    instead of the stdlib directory.
+    """
+    if name in sys.builtin_module_names:
+        return True
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError):
+        return False
+    if spec is None:
+        return False
+    if spec.origin in ("built-in", "frozen"):
+        return True
+    if spec.origin is None:                       # namespace package
+        return False
+    origin = Path(spec.origin).resolve()
+    if "site-packages" in origin.parts or "dist-packages" in origin.parts:
+        return False
+    stdlib = Path(sysconfig.get_paths()["stdlib"]).resolve()
+    try:
+        origin.relative_to(stdlib)
+    except ValueError:
+        return False
+    return True
 
 
 def _imports(path: Path) -> set[str]:
@@ -58,8 +96,7 @@ class ShippedPackageIsStdlibOnlyTest(unittest.TestCase):
     def test_no_third_party_dependency(self) -> None:
         external = {
             name for name in self._package_imports()
-            if name not in sys.stdlib_module_names
-            and name not in {"starter", "__future__"}
+            if name not in {"starter", "__future__"} and not _is_stdlib(name)
         }
         self.assertEqual(external, set(),
                          f"starter/ now depends on {sorted(external)}; "

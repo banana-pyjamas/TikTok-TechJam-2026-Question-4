@@ -246,9 +246,9 @@ USE_CONFIDENCE_WEIGHTING = False
 # tools.phase12_popularity` regenerates all of it, and moving the pipeline
 # means re-running it and editing here in the same change.
 #
-#   OFF   HR 0.2200   MRR 0.123369   MTTC 8.965   TS 0.187711
-#   ON    HR 0.2850   MRR 0.162099   MTTC 8.360   TS 0.243930     +0.056219
-#   McNemar +13, 13/0 discordant, p = 0.0002  -- established
+#   OFF   HR 0.8300   MRR 0.569732   MTTC 5.160   TS 0.702720
+#   ON    HR 0.8500   MRR 0.580597   MTTC 4.810   TS 0.722979     +0.020259
+#   McNemar +4, 4/0 discordant, p = 0.1250  -- no verdict
 #
 # tools/phase7_ablation.py reports a different figure for the same flag.
 # Both are right and they are different comparisons: the ladder ablates
@@ -258,10 +258,10 @@ USE_CONFIDENCE_WEIGHTING = False
 # prior's value to an agent that knows nothing, and this one is its value to
 # an agent that has asked. Read the scope, not only the number.
 #
-# Every scenario improves except boundary, which is 0.1000 in both arms --
-# and boundary is 10 sessions, so read it as "no evidence either way" rather
-# than as a null result. buying 0.3625 -> 0.4125, browsing 0.0750 -> 0.1625,
-# intent_override 0.2667 -> 0.3333.
+# buying 0.8500 -> 0.8625, browsing 0.8250 -> 0.8375, intent_override 0.7667
+# -> 0.8333, boundary identical. Discordant one way only (4/0), which is why
+# the point estimate is positive while the test does not clear -- four
+# sessions is not enough to establish anything on n=200.
 #
 # For comparison the entire Phase 0-6 stack is worth +0.0279 over the
 # baseline, so this one term is still worth more than everything before it

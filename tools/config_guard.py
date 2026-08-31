@@ -195,6 +195,26 @@ SEQUENCE_CONSTANTS: dict[tuple[str, str], Any] = {
         "color", "material", "brand", "size", "budget"),
 }
 
+# Bare-string constants that select behaviour. Same rule as the tuples: a
+# string that decides what the agent DOES is configuration; a string that is
+# a label, a key, or a message is content.
+STRING_CONSTANTS: dict[tuple[str, str], Any] = {
+    # Which question the clarification policy asks when it has no scorable
+    # one. Changing it changes what the shopper is asked on 42 of 200
+    # sessions, and it is the exact value the B Phase 15 review asked to see
+    # bounded.
+    ("clarify", "WILDCARD"): "other",
+}
+
+# Strings that are content: dictionary keys into a generic container, and
+# mode labels. Changing one renames a thing; it does not retune anything.
+CONTENT_STRINGS = {
+    ("catalog_meta", "TABLE"),
+    ("ranking", "POPULARITY_KEY"),
+    ("ranking", "RELIABILITY_KEY"),
+    ("reranker", "RERANK_KEY"),
+}
+
 # Tuple constants that are CONTENT, not configuration: word lists whose
 # growth is ordinary editing. Listed so the completeness check can tell
 # "deliberately content" from "forgotten", which is the distinction the
@@ -369,6 +389,36 @@ def discover_sequence_constants() -> set[tuple[str, str]]:
     return found
 
 
+def discover_string_constants() -> set[tuple[str, str]]:
+    """Every module-level bare-string constant in the ``starter`` package.
+
+    The third blind spot, found the same way as the first two: after the fix.
+    ``discover_numeric_constants`` sees floats and ints, ``discover_sequence_
+    constants`` sees tuples, and ``clarify.WILDCARD = "other"`` was neither --
+    a single string that selects which question the agent asks when it has no
+    scorable one, invisible to the whole battery (D Phase 15 review, item 4).
+
+    Underscore-prefixed names are skipped by the same convention the other two
+    discoverers use: a leading underscore marks module-private wiring, not a
+    knob someone tunes between runs.
+    """
+    found: set[tuple[str, str]] = set()
+    for module_name in STARTER_MODULES:
+        source = Path(_module(module_name).__file__).read_text(encoding="utf-8")
+        for node in ast.parse(source).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if not (isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                continue
+            for target in node.targets:
+                if (isinstance(target, ast.Name)
+                        and target.id.isupper()
+                        and not target.id.startswith("_")):
+                    found.add((module_name, target.id))
+    return found
+
+
 def source_flags() -> dict[tuple[str, str], Any]:
     """Every ``USE_`` flag's value as WRITTEN IN THE SOURCE.
 
@@ -436,22 +486,28 @@ def assert_all_constants_pinned() -> None:
             + ". Add each with its committed value, so that moving it later "
             "fails loudly instead of silently changing every measured number."
         )
-    sequences = discover_sequence_constants()
-    stale = sorted((set(SEQUENCE_CONSTANTS) | CONTENT_SEQUENCES) - sequences)
-    if stale:
-        raise SystemExit(
-            "config_guard: these registered tuple constants no longer exist: "
-            + ", ".join(f"{module}.{name}" for module, name in stale))
-    unclassified = sorted(
-        sequences - set(SEQUENCE_CONSTANTS) - CONTENT_SEQUENCES)
-    if unclassified:
-        raise SystemExit(
-            "config_guard: these tuple constants are neither pinned in "
-            "SEQUENCE_CONSTANTS nor declared content in CONTENT_SEQUENCES: "
-            + ", ".join(f"{module}.{name}" for module, name in unclassified)
-            + ". Decide which: a tuple that selects a policy is "
-            "configuration and must be pinned; a word list is content."
-        )
+    for kind, found, pinned, content in (
+        ("tuple", discover_sequence_constants(), SEQUENCE_CONSTANTS,
+         CONTENT_SEQUENCES),
+        ("string", discover_string_constants(), STRING_CONSTANTS,
+         CONTENT_STRINGS),
+    ):
+        stale = sorted((set(pinned) | content) - found)
+        if stale:
+            raise SystemExit(
+                f"config_guard: these registered {kind} constants no longer "
+                "exist: "
+                + ", ".join(f"{module}.{name}" for module, name in stale))
+        unclassified = sorted(found - set(pinned) - content)
+        if unclassified:
+            raise SystemExit(
+                f"config_guard: these {kind} constants are neither pinned nor "
+                "declared content: "
+                + ", ".join(f"{module}.{name}" for module, name in unclassified)
+                + f". Decide which: a {kind} that selects behaviour is "
+                "configuration and must be pinned; a label or a word list is "
+                "content."
+            )
 
 
 def assert_committed_constants() -> None:
@@ -463,7 +519,9 @@ def assert_committed_constants() -> None:
     assert_all_constants_pinned()
     drifted = []
     for (module_name, name), expected in sorted(
-            list(COMMITTED_CONSTANTS.items()) + list(SEQUENCE_CONSTANTS.items())):
+            list(COMMITTED_CONSTANTS.items())
+            + list(SEQUENCE_CONSTANTS.items())
+            + list(STRING_CONSTANTS.items())):
         actual = getattr(_module(module_name), name)
         if actual != expected:
             drifted.append(f"{module_name}.{name}: {actual!r} != {expected!r}")
@@ -527,10 +585,12 @@ def assert_everything() -> list[str]:
     checks.append(f"COMMITTED_FLAGS matches the source ({len(COMMITTED_FLAGS)})")
     numeric = discover_numeric_constants()
     sequences = discover_sequence_constants()
+    strings = discover_string_constants()
     assert_committed_constants()
     checks.append(
         f"every constant is pinned and undrifted "
-        f"({len(numeric)} numeric, {len(sequences)} tuple)")
+        f"({len(numeric)} numeric, {len(sequences)} tuple, "
+        f"{len(strings)} string)")
     return checks
 
 

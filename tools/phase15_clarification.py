@@ -423,10 +423,16 @@ def main() -> None:
             f"{label} score", composites_by_sample(off),
             composites_by_sample(results[label])))
 
-    print("\n   the comparisons that decide the knob, A/B/C against each other")
+    print("\n   the comparisons that decide the knob, A/B/C against each")
+    print("   other -- and harness-fit against the SHIPPED arm, which is the")
+    print("   comparison clarify.USE_CLARIFICATION's comment justifies a")
+    print("   decision from. It was only ever measured against OFF, leaving")
+    print("   that decision unpriced by its own instrument (D Phase 15")
+    print("   review).")
     for left, right in (("A unbounded", "C one-other"),
                         ("B no-other", "C one-other"),
-                        ("B no-other", "A unbounded")):
+                        ("B no-other", "A unbounded"),
+                        (shipped_arm, "harness-fit")):
         print("     " + format_test(
             f"{right} vs {left} hits",
             mcnemar(hits_by_sample(results[left]),
@@ -455,13 +461,19 @@ def main() -> None:
     print("   least specific policy, so a policy chosen for topping this")
     print("   table would be chosen by the simulator.")
     print("\n   WHAT THE A/C ROW PAIR SAYS, which is the answer to the")
-    print("   blocker: capping the open question at one per session is FREE.")
-    print("   A and C are identical -- 0/0 discordant, 0 of 200 sessions")
-    print("   moved, every metric equal to six decimals -- because with the")
-    print("   evidence tier in the ladder no session ever wanted a second")
-    print("   open question in the first place. The cap is not a trade; it is")
-    print("   a guarantee about a thing that was already true, which is worth")
-    print("   having precisely because nothing enforced it before.")
+    print("   blocker: capping the open question is SCORE-free and NOT")
+    print("   behaviour-free, and the difference matters. Read the 'other'")
+    print("   column against 'used': A's 0.33 per session over 42 sessions is")
+    print("   66 asks, so 24 sessions asked the open question more than once")
+    print("   -- 10 of which go on to hit. C asks it exactly once in each of")
+    print("   the same 42. Every metric is nonetheless equal to six decimals")
+    print("   and 0 of 200 sessions moved, so the cap removes 24 repeat")
+    print("   questions that changed no outcome.")
+    print("\n   That is a better thing to be able to say than 'nothing was")
+    print("   happening'. The thing the cap forbids -- re-asking a productive")
+    print("   wildcard until it dries up -- WAS happening, on 24 sessions,")
+    print("   and it is farming a harness whose rules favour it. It now")
+    print("   cannot happen, at no measured cost.")
     print("\n   B, the strictly-generic policy, costs an ESTABLISHED 0.0370")
     print("   (9/0 discordant, p = 0.0039; score p = 0.0017). That is the")
     print("   honest price of removing the open question entirely, and it is")

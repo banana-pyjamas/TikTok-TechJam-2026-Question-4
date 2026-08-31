@@ -154,42 +154,50 @@ DEFAULT_ROUTES = ("bm25", "category")
 # pool before then is a pool hit that could never have become a score.
 # Turn-level and override-aware:
 #
-#   target in pool on ANY turn                   162/200
-#   target in pool on a SCORING-ELIGIBLE turn    149/200   <- the honest one
-#   never in pool on an eligible turn             51/200
-#      of which never in the pool at all          38   <- what 7c52e87 counted
-#      of which in the pool ONLY pre-override     13
+#   target in pool on ANY turn                   196/200
+#   target in pool on a SCORING-ELIGIBLE turn    195/200   <- the honest one
+#   never in pool on an eligible turn              5/200
+#      of which never in the pool at all           4   <- what 7c52e87 counted
+#      of which in the pool ONLY pre-override      1
 #
-# So retrieval loses 51 sessions, not 38, and its own metric says the headroom
-# is +0.2550 candidate recall over eligible turns. That is the only figure
-# here that is not an inference. Downstream it depends on WHERE a route puts
-# the target, measured by re-running the evaluator with the answer injected
-# into those 51 sessions and no others:
+# So retrieval loses 5 sessions and its own metric says the headroom is
+# +0.0250 candidate recall over eligible turns. That is the only figure here
+# that is not an inference. Downstream it depends on WHERE a route puts the
+# target, measured by re-running the evaluator with the answer injected into
+# those 5 sessions and no others:
 #
-#   injected at the pool FLOOR (fusion_score 0)   TS +0.0047    1/51 convert
-#   injected at the pool HEAD  (best fusion)      TS +0.2225   51/51 convert
+#   injected at the pool FLOOR (fusion_score 0)   TS +0.0043   1/0 discordant
+#   injected at the pool HEAD  (best fusion)      TS +0.0239   5/0, p = 0.0625
 #
-# So retrieval's downstream value is somewhere in [+0.0047, +0.2225] TS, and
-# RANK matters far more than presence: getting the target into the pool at the
-# bottom recovers one session in fifty-one. The "+0.025 TS ceiling" quoted for
-# this phase in 7c52e87 is neither bound -- it was an extrapolation, and it
-# moved the HitRate term only, while TS = 0.5*HR + 0.3*MRR + 0.2*eff and a
-# recovered hit moves all three. Applied consistently and at the corrected
-# scope it is +0.0766. Withdrawn in favour of the bracket.
+# So retrieval's downstream value is somewhere in [+0.0043, +0.0239] TS and
+# NEITHER END IS ESTABLISHED -- even handing retrieval the answer on every
+# session it loses does not clear 0.05 any more. That is the Phase 15 result,
+# not a Phase 13 one: this block read 51 sessions and [+0.0047, +0.2225]
+# until clarification gave retrieval real constraints to search on. The
+# "+0.025 TS ceiling" quoted in 7c52e87 was an extrapolation that moved the
+# HitRate term only, while TS = 0.5*HR + 0.3*MRR + 0.2*eff; withdrawn in
+# favour of the bracket, which has since closed almost to nothing.
 #
-# Meanwhile 96 targets reach the pool on a turn that COULD have scored and
-# still lose: ~1.9x the session count of the whole retrieval surface, all of
-# it downstream of this file. (7c52e87 published 120 and 3.2x; both terms of
-# that ratio were session-level and override-blind.)
+# Meanwhile 25 targets reach the pool on a turn that COULD have scored and
+# still lose: 5.0x the session count of the whole retrieval surface, all of it
+# downstream of this file. (7c52e87 published 120 and 3.2x; both terms of that
+# ratio were session-level and override-blind.)
 #
-# WHICH NUMBERS HERE MOVE WHEN THE RANKER MOVES. The retrieval facts do not:
-# 162/149/51/38/13 and +0.2550 recall are properties of the pool and were
-# identical before and after Phase 14 shipped. The CONVERSION facts do, and
-# these are stated against the committed ranker WITH the Phase 14 reranker ON.
-# Phase 14 moved in-pool conversion from 42/149 to 53/149, which is why the
-# in-pool losses fell from 107 to 96 and the ratio from 2.1x to 1.9x. Re-run
-# the gate after any ranking change; it reads the committed configuration and
-# will disagree with this comment rather than quietly agree with it.
+# WHICH NUMBERS HERE MOVE, AND WHY EVEN THE "RETRIEVAL FACTS" DID. This
+# comment used to say 162/149/51/38/13 and +0.2550 recall were properties of
+# the pool that nothing downstream could touch. That was true of the RANKER
+# and false in general, because Phase 15 changed the QUERY: once the agent
+# asks and the shopper answers, retrieval is searching on constraints it
+# never had. Those five numbers are now 196/195/5/4/2 and the headroom is
+# +0.0250 recall.
+#
+# So the honest rule is narrower than the old one. Nothing DOWNSTREAM of
+# retrieval moves these; anything that changes what the shopper SAYS does.
+# The conversion facts move under both. All of them are stated against the
+# committed configuration: 170/195 in-pool conversion, 25 in-pool losses,
+# 5.0x. Re-run `python3 -m tools.phase13_dense_gate` after any change to
+# ranking OR to the dialogue; it reads the committed configuration and will
+# disagree with this comment rather than quietly agree with it.
 #
 # 4  RETRACTION: THE VOCABULARY ARGUMENT MEASURED THE SIMULATOR
 #

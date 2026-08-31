@@ -20,16 +20,23 @@ from starter.reliability import match_reliability, slot_coverage
 # the guard's report and OFF in the code it governs. Phase 12 closed that
 # exact hole once already; it is not being reopened one module over.
 from starter import clarify, reranker
-from starter.retrieval import (DEFAULT_ROUTES, POOL_LIMIT, bm25_route,
-                               fuse, retrieve)
+from starter.retrieval import (_BM25_RANK, DEFAULT_ROUTES, POOL_LIMIT,
+                               bm25_route, fuse, retrieve)
 from starter.state import update_state
 from starter.text import flatten_text as _text
 from starter.text import terms as _terms
 
 
-# The baseline BM25 field-weight expression. Kept as one constant so the
-# SELECT projection and the ORDER BY can never drift apart (CP 1.3).
-_BM25_RANK = "bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)"
+# `_BM25_RANK` is IMPORTED from retrieval above, not restated here.
+#
+# It was a second copy of the same seven field weights until the D Phase 15
+# review pointed at it. Two identical literals in two modules is the drift
+# shape this repo keeps finding (D-N2, D-P1): nothing would have failed if one
+# of them had been retuned, the Phase 1 baseline path and the retrieval route
+# would silently have been scoring different documents, and every ablation
+# comparing them would have been comparing two things. The constant exists so
+# the SELECT projection and the ORDER BY cannot drift apart (CP 1.3); that
+# argument applies across modules for exactly the same reason.
 _RESPONSE_MESSAGE = "Here are the closest matches I found."
 
 # --------------------------------------------------------------------------

@@ -135,13 +135,18 @@ from starter.state import is_non_answer
 #                                                 p = 0.0039  established
 #   wildcard every turn (D)         TS 0.719419
 #   first empty slot                TS 0.704984
-#   harness-fitted                  TS 0.726837   vs shipped: +1, 2/1, p = 1.0
+#   harness-fitted                  TS 0.726837   vs shipped: -2 hits, 0/2,
+#                                                 p = 0.5000; score +0.003858,
+#                                                 CI [-0.0088, +0.0132],
+#                                                 p = 0.5031. No verdict.
 #
 # Read the A row first: capping the open question at one per session costs
-# nothing measurable, because with the evidence tier no session wanted a
-# second one. Then read B: removing it entirely costs an established 0.0370.
-# So the open question is no longer load-bearing but it is not free either,
-# and both facts are stated rather than one of them.
+# nothing measurable. It is not, however, a no-op -- A asks the wildcard 66
+# times across those 42 sessions and C asks it 42 times, so the cap really
+# does remove 24 repeat questions; they simply changed no session's outcome.
+# See MAX_OPEN_QUESTIONS. Then read B: removing the open question entirely
+# costs an established 0.0370. So it is no longer load-bearing and it is not
+# free either, and both facts are stated rather than one of them.
 #
 # The shipped policy is ahead of the wildcard-every-turn arm and the naive
 # first-empty-slot arm, and neither margin is established -- stated plainly,
@@ -163,9 +168,14 @@ from starter.state import is_non_answer
 # returns "category", so those two questions can never be answered on this
 # harness: the scorer asks brand on 200 turns, every one is declined, and
 # CP 15.7 closes it having cost one turn per session. Deleting them from
-# ``SCORABLE_ATTRIBUTES`` is worth +0.0144 TS -- and it is worth ONE session
-# (2/1 discordant, p = 1.0000, no verdict), while being a policy fitted to
-# the branch list of a simulator's classifier. Brand is the single most
+# ``SCORABLE_ATTRIBUTES`` is worth +0.003858 TS on a 95% CI of
+# [-0.0088, +0.0132] that STRADDLES ZERO, and it LOSES two sessions on hits
+# (0/2 discordant, p = 0.5000) -- no verdict on either test, from a
+# comparison the tool only started making against the shipped arm after the
+# D Phase 15 review pointed out it had only ever been made against OFF. The
+# figures here read +0.0144 and 2/1 until then, which were against the wrong
+# baseline. It remains a policy fitted to the branch list of a simulator's
+# classifier. Brand is the single most
 # discriminating thing this catalog knows and asking a real shopper about it
 # is a good question. Not taken.
 USE_CLARIFICATION = True
@@ -289,14 +299,25 @@ ASK_VALUE_FLOOR = 0.10
 #   C  at most one  <-     0.722979       0.21             42/200
 #   D  wildcard every turn 0.719419       3.72            200/200
 #
-# A and C are IDENTICAL -- 0/0 discordant, 0 of 200 sessions moved, every
-# metric equal to six decimals. With the evidence tier in the ladder no
-# session ever wants a second open question, so capping it changes nothing
-# that happens; it only guarantees a thing that was already true. That is
-# worth having exactly because nothing enforced it before, and because the
-# thing it forbids -- re-asking a productive wildcard until it dries up -- is
-# farming a harness whose ``customer_reply`` treats "other" as matching a
-# strict superset of every specific attribute.
+# THE CAP IS SCORE-FREE, NOT BEHAVIOUR-FREE, and the first version of this
+# comment got that wrong. It said "no session ever wanted a second open
+# question", which the tool's own table contradicts thirty characters away:
+# 0.33 per session over 42 sessions is 66 asks, not 42 (B Phase 15 review,
+# E1). Measured directly:
+#
+#   A  66 wildcard asks over 42 sessions; 24 of those sessions asked twice
+#      or more. 10 of the 24 go on to HIT, so the repeats are not confined
+#      to sessions that were lost anyway.
+#   C  42 asks over the same 42 sessions; exactly one each, by construction.
+#
+# And yet A and C score identically -- 0/0 discordant, 0 of 200 sessions
+# moved, every metric equal to six decimals. So the cap removes 24 repeat
+# questions that changed no session's outcome. It is a real behavioural
+# change with no measurable price, which is a better thing to be able to say
+# than "nothing was happening": the thing it forbids -- re-asking a
+# productive wildcard until it dries up -- is farming a harness whose
+# ``customer_reply`` treats "other" as matching a strict superset of every
+# specific attribute, and it WAS happening on 24 sessions.
 #
 # B is the strictly-generic policy: no open question at any point. It costs
 # an ESTABLISHED 0.0370 (9/0 discordant, p = 0.0039; paired permutation over

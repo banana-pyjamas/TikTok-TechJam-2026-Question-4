@@ -16,9 +16,9 @@ anything upstream moves, so they are regenerated rather than remembered:
 The motivation has NOT survived intact, and pretending otherwise would be the
 easy lie. Phase 13 said the problem was ORDER, not retrieval, on the evidence
 that 51 of 200 sessions never got the target into the pool and 92 that did
-still lost. With clarification supplying real constraints, 6 sessions never
+still lost. With clarification supplying real constraints, 5 sessions never
 retrieve the target and 25 in-pool sessions still lose. Retrieval headroom
-went from +0.2550 recall to +0.0300. This stage still pays -- more than it
+went from +0.2550 recall to +0.0250. This stage still pays -- more than it
 did, see the ablation below -- but it is no longer answering the question it
 was built to answer, because that question has largely been dissolved by
 asking the shopper what they want.)
@@ -190,6 +190,23 @@ USE_SEMANTIC_RERANK = True
 # and it lands inside the established plateau with almost nothing lost (28
 # gained, 1 lost). An a-priori value inside a broad established plateau
 # generalizes better than a peak picked off the plateau's own chart.
+#
+# C's Phase 15 review recommends 200 and did the arithmetic properly: vs the
+# shipped 50 it is +0.036680 TS at 10 gained / 0 lost, p = 0.002, with a
+# bootstrap CI that does not cross zero, no scenario regressing, and a
+# verified mechanism -- 8 of the 25 ranking failures are targets truncated by
+# the top-50 cut, and 8 of those 8 recover at 200. C also asked for the one
+# check they had not run, since a silent CP 14.4 fallback would turn the gain
+# into an artifact. Run at depth 200 over the public set:
+#
+#   scorer.order elapsed_ms   mean 0.386   P90 0.490   max 1.638
+#   budget overruns (timeouts)   0    (RERANK_BUDGET_MS = 150)
+#
+# Two orders of magnitude inside the budget, so the gain is not fallback
+# noise. NOT TAKEN IN THIS COMMIT, and the reason is sequencing rather than
+# doubt: the B Phase 15 review is holding on evidence and explicitly asks for
+# no production tuning, and moving this constant would move every number that
+# review is verifying. It is the next change after Phase 15 closes.
 #
 # The +0.014 at 100 is left on the table deliberately and recorded here so the
 # choice is auditable rather than quietly optimal. Whoever revisits it should
