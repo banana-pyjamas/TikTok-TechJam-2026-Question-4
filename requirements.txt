@@ -1,0 +1,14 @@
+# No third-party dependencies.
+#
+# This file is deliberately empty of packages. It exists so that "this
+# submission needs nothing installed" is a stated fact rather than an absent
+# manifest -- docs/submission_rules.md asks for a dependency manifest, and an
+# organizer unpacking the bundle cannot tell "no dependencies" from "nobody
+# wrote the file".
+#
+# starter/ imports only the standard library: collections, copy, dataclasses,
+# json, math, pathlib, re, sqlite3, statistics, time, typing. There is no LLM
+# client, no vector library, and no network library anywhere in the package.
+#
+# tests/test_submission.py fails if that ever stops being true, so this
+# comment cannot go stale without something going red.
